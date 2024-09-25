@@ -1,0 +1,76 @@
+# This docker-compose file is configured to run Synqly Embedded locally for 
+# test purposes. Synqly Embedded combines Synqly's Management and Connector APIs
+# documented here: https://docs.synqly.com/reference/api-overview
+#
+# Synqly APIs will be available at localhost:9000
+volumes:
+  embedded-database:
+  embedded-mail:
+
+services:
+  embedded:
+    image: quay.io/synqly/embedded
+    # (Demo) Update the following values:
+    #   --organization-name: Name of the generated Synqly Organization
+    #   (if running embedded-mail): 
+    #   --invite-member: email address to invite as the default admin of the generated Synqly Organization
+    #
+    # (Production) Update the following values:
+    #  --organization-name: Name of the generated Synqly Organization
+    #  --db-host: Hostname of a production-ready Postgres compatible DB
+    #  --db-user: DB username
+    #  --db-pass: DB Password
+    command: >
+      embedded --organization-name=embedded --organization-fullname=Embedded \
+      --level=-1 --requests-per-min=10000 --db-host=embedded-database \
+      --db-port=26257 --port=9040 --token=test-token --token-signing-key=AFLd3iCkfv5yLJ605HXoUiVgBCAMauWcmCMUkNORClg= \
+      --smtp-server=embedded-mail:1025 --smtp-user=test@synqly.com \
+      --smtp-pass=password1 --smtp-tls=false --smtp-domain=http://localhost:3000 \
+      --invite-member="test@synqly.com"
+    ports:
+      - "9000:9040"
+    depends_on:
+      embedded-database:
+        condition: service_healthy
+        restart: true
+        
+  # (Demo only) Runs a single-node CockroachDB instance locally. This is not
+  # supported for production. If running in a production environment, use a
+  # durable externally managed database instead.
+  embedded-database:
+    image: cockroachdb/cockroach
+    command: start-single-node --insecure
+    ports:
+      - "8080:8080"
+      - "26257:26257"
+    volumes:
+      -  ~/demo-apps/embedded-local-db:/cockroach/cockroach-data
+    environment:
+      COCKROACH_DATABASE: synqly
+    healthcheck:
+      test: curl -f 'http://localhost:8080/api/v2/health/?ready=true' && curl -f 'http://localhost:8080/api/v2/databases/synqly/tables/'
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # (Optional, Demo Only) Runs a local SMTP server for testing email functionality. 
+  # If enabled, set --smtp-server, --smtp-user, --smtp-pass, --smtp-domain, and 
+  # --smtp-tls on the embedded service. 
+  embedded-mail:
+    image: axllent/mailpit
+    restart: always
+    volumes:
+      - embedded-mail:/data
+    ports:
+      - 8025:8025
+      - 1025:1025
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_DATA_FILE: /data/mailpit.db
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    healthcheck:
+      test: nc -z localhost 8025
+      interval: 3s
+      timeout: 3s
+      retries: 10
