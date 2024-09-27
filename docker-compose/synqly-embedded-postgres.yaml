@@ -35,7 +35,7 @@ services:
         condition: service_healthy
         restart: true
         
-  # (Demo only) Runs a single-node CockroachDB instance locally. This is not
+  # (Demo only) Runs a single-node PostgreSQL instance locally. This is not
   # supported for production. If running in a production environment, use a
   # durable externally managed database instead.
   embedded-database:
