@@ -24,6 +24,12 @@ mkdir -p ~/demo-apps/embedded-cockroachdb
 mkdir -p ~/demo-apps/embedded-postgres
 ```
 
+Update the local DB user and password in `.env` to non default values:
+```txt
+DB_USER=<new-user>
+DB_PASS=<new-password>
+```
+
 ## First Run
 
 Run Synqly Embedded with the following command:

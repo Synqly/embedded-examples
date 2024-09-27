@@ -21,12 +21,12 @@ services:
     #  --db-user: DB username
     #  --db-pass: DB Password
     command: >
-      embedded --organization-name=embedded --organization-fullname=Embedded \
+      embedded --organization-name=${SYNQLY_ORG_NAME} --organization-fullname=${SYNQLY_ORG_FULL_NAME} \
         --level=-1 --requests-per-min=10000 --db-host=embedded-database \
-        --db-port=5432 --db-user demo_synqly --db-pass demo_postgres_3092qmc290 \
-        --port=9040 --token=test-token --token-signing-key=AFLd3iCkfv5yLJ605HXoUiVgBCAMauWcmCMUkNORClg= \
-        --smtp-server=embedded-mail:1025 --smtp-user=test@synqly.com \
-        --smtp-pass=password1 --smtp-tls=false --smtp-domain=http://localhost:3000 \
+        --db-port=5432 --db-user ${DB_USER} --db-pass ${DB_PASS} \
+        --port=9040 --token=${SYNQLY_ROOT_TOKEN} --token-signing-key=${SYNQLY_TOKEN_SIGNING_KEY} \
+        --smtp-server=embedded-mail:1025 --smtp-user=${SMTP_USER} \
+        --smtp-pass=${SMTP_PASS}  --smtp-tls=false --smtp-domain=http://localhost:3000 \
         --invite-member="test@sample.com"
     ports:
       - "9000:9040"
@@ -45,8 +45,8 @@ services:
     volumes:
       - ~/demo-apps/embedded-postgres:/var/lib/postgresql/data
     environment:
-      - POSTGRES_PASSWORD=demo_postgres_3092qmc290
-      - POSTGRES_USER=demo_synqly
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASS}
       - POSTGRES_DB=synqly
     healthcheck:
       test: ["CMD-SHELL", 'pg_isready -U demo_synqly -d synqly']
