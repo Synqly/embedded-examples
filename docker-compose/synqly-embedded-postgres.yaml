@@ -9,7 +9,7 @@ volumes:
 
 services:
   embedded:
-    image: quay.io/synqly/embedded
+    image: quay.io/synqly/embedded:latest
     # (Demo) Update the following values:
     #   --organization-name: Name of the generated Synqly Organization
     #   (if running embedded-mail): 
@@ -22,11 +22,12 @@ services:
     #  --db-pass: DB Password
     command: >
       embedded --organization-name=embedded --organization-fullname=Embedded \
-      --level=-1 --requests-per-min=10000 --db-host=embedded-database \
-      --db-port=26257 --port=9040 --token=test-token --token-signing-key=AFLd3iCkfv5yLJ605HXoUiVgBCAMauWcmCMUkNORClg= \
-      --smtp-server=embedded-mail:1025 --smtp-user=test@synqly.com \
-      --smtp-pass=password1 --smtp-tls=false --smtp-domain=http://localhost:3000 \
-      --invite-member="test@synqly.com"
+        --level=-1 --requests-per-min=10000 --db-host=embedded-database \
+        --db-port=5432 --db-user demo_synqly --db-pass demo_postgres_3092qmc290 \
+        --port=9040 --token=test-token --token-signing-key=AFLd3iCkfv5yLJ605HXoUiVgBCAMauWcmCMUkNORClg= \
+        --smtp-server=embedded-mail:1025 --smtp-user=test@synqly.com \
+        --smtp-pass=password1 --smtp-tls=false --smtp-domain=http://localhost:3000 \
+        --invite-member="test@sample.com"
     ports:
       - "9000:9040"
     depends_on:
@@ -38,20 +39,21 @@ services:
   # supported for production. If running in a production environment, use a
   # durable externally managed database instead.
   embedded-database:
-    image: cockroachdb/cockroach
-    command: start-single-node --insecure
+    image: postgres:16.4
     ports:
-      - "8080:8080"
-      - "26257:26257"
+      - 5432:5432
     volumes:
-      -  ~/demo-apps/embedded-local-db:/cockroach/cockroach-data
+      - ~/demo-apps/embedded-postgres:/var/lib/postgresql/data
     environment:
-      COCKROACH_DATABASE: synqly
+      - POSTGRES_PASSWORD=demo_postgres_3092qmc290
+      - POSTGRES_USER=demo_synqly
+      - POSTGRES_DB=synqly
     healthcheck:
-      test: curl -f 'http://localhost:8080/api/v2/health/?ready=true' && curl -f 'http://localhost:8080/api/v2/databases/synqly/tables/'
-      interval: 3s
-      timeout: 3s
-      retries: 10
+      test: ["CMD-SHELL", 'pg_isready -U demo_synqly -d synqly']
+      interval: 30s
+      timeout: 60s
+      retries: 5
+      start_period: 80s
 
   # (Optional, Demo Only) Runs a local SMTP server for testing email functionality. 
   # If enabled, set --smtp-server, --smtp-user, --smtp-pass, --smtp-domain, and 

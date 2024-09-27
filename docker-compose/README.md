@@ -6,20 +6,38 @@
 
 This compose file also expects a local data directory to persist the database between docker-compose runs.
 This directory can be any directory that's a valid mountable directory for docker.
-If you change the directory path, make sure to update it in `synqly-embedded-compose.yaml`
-at `services.embedded-database.volumes[0]`.
+If you change the directory path, make sure to update
+`services.embedded-database.volumes[0]` in the docker-compose file you are using.
 
-Create a local directory by running the following:
+Synqly Embedded is compatible with any PostgreSQL compatible database, this
+directory contains docker-compose examples for both CockroachDB and Postgres.
+
+Decide which database you'd like to run with, then create a local directory by running the following:
+
+### CockroachDB
 ```
-mkdir -p ~/demo-apps/embedded-local-db
+mkdir -p ~/demo-apps/embedded-cockroachdb
+```
+
+### Postgres
+```
+mkdir -p ~/demo-apps/embedded-postgres
 ```
 
 ## First Run
 
-Run Synqly embedded by running the following command:
+Run Synqly Embedded with the following command:
+
+### CockroachDB
 
 ```shell
-docker compose -f synqly-embedded-compose.yaml up
+docker compose -f synqly-embedded-cockroachdb.yaml up
+```
+
+### Postgres
+
+```shell
+docker compose -f synqly-embedded-postgres.yaml up
 ```
 
 This will take a few minutes the first time running things while the images
@@ -50,6 +68,22 @@ embedded-1           |     "organization_type": "standard",
 ...
 ```
 
+## Embedded Address
+
+Once all of the containers have booted, Synqly Embedded APIs will be available
+at `http://localhost:9000`. 
+
+To quickly test whether Embedded is running as expected, run the following command
+to fetch the build version:
+```bash
+curl localhost:9000/v1/version
+```
+
+The response should resemble the following:
+```bash
+{"commit":"e5b1522f","date":"Fri Sep 27 16:30:56 UTC 2024","go_version":"go version go1.22.7 linux/amd64","version":"20240927.1629.01-e5b1522"}%
+```
+
 ## Run a Single Service
 
 To run a single service only (such as the database):
@@ -60,11 +94,23 @@ docker compose -f synqly-embedded-compose.yaml up embedded-database
 
 ## Wipe Local Data
 
+### CockroachDB
+
 Use the following commands to reset the local data directory:
 ```bash
 # Wipe local database storage
-rm -rf ~/demo-apps/embedded-local-db
+rm -rf ~/demo-apps/embedded-cockroachdb
 
 # Re-initialize local storage
-mkdir -p ~/demo-apps/embedded-local-db
+mkdir -p ~/demo-apps/embedded-cockroachdb
+```
+
+### Postgres
+
+```bash
+# Wipe local database storage
+rm -rf ~/demo-apps/embedded-postgres
+
+# Re-initialize local storage
+mkdir -p ~/demo-apps/embedded-postgres
 ```
