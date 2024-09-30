@@ -12,14 +12,8 @@ If you change the directory path, make sure to update
 Synqly Embedded is compatible with any PostgreSQL compatible database, this
 directory contains docker-compose examples for both CockroachDB and Postgres.
 
-Decide which database you'd like to run with, then create a local directory by running the following:
+Create a local directory by running the following:
 
-### CockroachDB
-```
-mkdir -p ~/demo-apps/embedded-cockroachdb
-```
-
-### Postgres
 ```
 mkdir -p ~/demo-apps/embedded-postgres
 ```
@@ -33,14 +27,6 @@ DB_PASS=<new-password>
 ## First Run
 
 Run Synqly Embedded with the following command:
-
-### CockroachDB
-
-```shell
-docker compose -f synqly-embedded-cockroachdb.yaml up
-```
-
-### Postgres
 
 ```shell
 docker compose -f synqly-embedded-postgres.yaml up
@@ -99,19 +85,6 @@ docker compose -f synqly-embedded-compose.yaml up embedded-database
 ```
 
 ## Wipe Local Data
-
-### CockroachDB
-
-Use the following commands to reset the local data directory:
-```bash
-# Wipe local database storage
-rm -rf ~/demo-apps/embedded-cockroachdb
-
-# Re-initialize local storage
-mkdir -p ~/demo-apps/embedded-cockroachdb
-```
-
-### Postgres
 
 ```bash
 # Wipe local database storage
