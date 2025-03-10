@@ -1,4 +1,4 @@
-# This docker-compose file is configured to run Synqly Embedded locally for 
+# This docker-compose file is configured to run Synqly Embedded locally for
 # test purposes. Synqly Embedded combines Synqly's Management and Connector APIs
 # documented here: https://docs.synqly.com/reference/api-overview
 #
@@ -12,7 +12,7 @@ services:
     image: quay.io/synqly/embedded:latest
     # (Demo) Update the following values:
     #   --organization-name: Name of the generated Synqly Organization
-    #   (if running embedded-mail): 
+    #   (if running embedded-mail):
     #   --invite-member: email address to invite as the default admin of the generated Synqly Organization
     #
     # (Production) Update the following values:
@@ -27,14 +27,16 @@ services:
         --port=9040 --token=${SYNQLY_ROOT_TOKEN} --token-signing-key=${SYNQLY_TOKEN_SIGNING_KEY} \
         --smtp-server=embedded-mail:1025 --smtp-user=${SMTP_USER} \
         --smtp-pass=${SMTP_PASS}  --smtp-tls=false --smtp-domain=http://localhost:3000 \
-        --invite-member="test@sample.com"
+        --invite-member="test@sample.com" \
+        --admin=${ADMIN_EMAIL} --admin-password=${ADMIN_PASSWORD}
     ports:
       - "9000:9040"
+      - "9001:9000"
     depends_on:
       embedded-database:
         condition: service_healthy
         restart: true
-        
+
   # (Demo only) Runs a single-node PostgreSQL instance locally. This is not
   # supported for production. If running in a production environment, use a
   # durable externally managed database instead.
@@ -55,9 +57,9 @@ services:
       retries: 5
       start_period: 80s
 
-  # (Optional, Demo Only) Runs a local SMTP server for testing email functionality. 
-  # If enabled, set --smtp-server, --smtp-user, --smtp-pass, --smtp-domain, and 
-  # --smtp-tls on the embedded service. 
+  # (Optional, Demo Only) Runs a local SMTP server for testing email functionality.
+  # If enabled, set --smtp-server, --smtp-user, --smtp-pass, --smtp-domain, and
+  # --smtp-tls on the embedded service.
   embedded-mail:
     image: axllent/mailpit
     restart: always
