@@ -2,7 +2,7 @@
 # test purposes. Synqly Embedded combines Synqly's Management and Connector APIs
 # documented here: https://docs.synqly.com/reference/api-overview
 #
-# Synqly APIs will be available at localhost:9000
+# Synqly APIs will be available at localhost:8000
 volumes:
   embedded-database:
   embedded-mail:
@@ -24,14 +24,14 @@ services:
       embedded --organization-name=${SYNQLY_ORG_NAME} --organization-fullname=${SYNQLY_ORG_FULL_NAME} \
         --level=-1 --requests-per-min=10000 --db-host=embedded-database \
         --db-port=5432 --db-user ${DB_USER} --db-pass ${DB_PASS} \
-        --port=9040 --token=${SYNQLY_ROOT_TOKEN} --token-signing-key=${SYNQLY_TOKEN_SIGNING_KEY} \
+        --port=8000 --token=${SYNQLY_ROOT_TOKEN} --token-signing-key=${SYNQLY_TOKEN_SIGNING_KEY} \
         --smtp-server=embedded-mail:1025 --smtp-user=${SMTP_USER} \
         --smtp-pass=${SMTP_PASS}  --smtp-tls=false --smtp-domain=http://localhost:3000 \
         --invite-member="test@sample.com" \
         --admin=${ADMIN_EMAIL} --admin-password=${ADMIN_PASSWORD}
     ports:
-      - "9000:9040"
-      - "9001:9000"
+      - "8000:8000"
+      - "9001:9000"  # Private API is used by the UI
     depends_on:
       embedded-database:
         condition: service_healthy

@@ -37,10 +37,10 @@ download and database initializes.
 
 On the first docker-compose run, Embedded will generate a Synqly Organization and
 print the organization details to the docker compose logs. Copy this information
-somewhere durable. 
+somewhere durable.
 
 The token listed under `organization.token.access.secret` is an
-Organization token. It can be used to start running Management API calls, such 
+Organization token. It can be used to start running Management API calls, such
 as to [Create an Account](https://docs.synqly.com/reference/accounts_create).
 
 ```bash
@@ -63,12 +63,12 @@ embedded-1           |     "organization_type": "standard",
 ## Embedded Address
 
 Once all of the containers have booted, Synqly Embedded APIs will be available
-at `http://localhost:9000`. 
+at `http://localhost:8000`.
 
 To quickly test whether Embedded is running as expected, run the following command
 to fetch the build version:
 ```bash
-curl localhost:9000/v1/version
+curl localhost:8000/v1/version
 ```
 
 The response should resemble the following:

@@ -2,9 +2,7 @@
 
 ## Overview
 
-The `init-org.py` script is a utility designed to initialize or reset organization tokens for Synqly Embedded. This script automates the process of retrieving organization details, authenticating as an admin user, and generating new access and refresh tokens for a Synqly organization.
-
-Note that this script makes use of the private API endpoints that run on a separate port from the public API. These run on port `9000` and you must ensure that this port is exposed and accessible. See the [docker-compose example README](../docker-compose/README.md) for more details.
+The `init-org.py` script is a utility designed to initialize or reset organization tokens for Synqly Embedded. This script automates the process of, authenticating as an admin user, retrieving organization details, and generating new access and refresh tokens for a Synqly organization.
 
 ## Requirements
 
@@ -19,7 +17,7 @@ The script uses environment variables for configuration. The provided `.env` fil
 
 ## Usage
 
-Make sure your Synqly Embedded service is running and has the private API exposed through a separate port. The default in the docker-compose example is `http://localhost:9001`; for production, this endpoint should not be exposed publicly and so you would need to use a tool like kube-proxy or private service to access it.
+Make sure your Synqly Embedded service is running and has the API exposed. The default in the docker-compose example is `http://localhost:8000`.
 
 Export the environment variables from the `.env` file:
 

@@ -4,8 +4,7 @@ import os
 import requests
 
 # Base URL for all requests
-BASE_URL = "http://localhost:9001"
-ROOT_TOKEN = os.getenv("SYNQLY_ROOT_TOKEN")
+BASE_URL = os.getenv("BASE_URL") if os.getenv("BASE_URL") else "http://localhost:8000"
 
 admin_email = os.getenv("ADMIN_EMAIL")
 admin_password = os.getenv("ADMIN_PASSWORD")
@@ -14,7 +13,6 @@ organization_name = os.getenv("SYNQLY_ORG_NAME")
 # Common headers
 headers = {
     "Content-Type": "application/json",
-    "Authorization": f"Bearer {ROOT_TOKEN}"
 }
 
 def print_response(response, description):
@@ -29,35 +27,9 @@ def print_response(response, description):
         print(f"Response Text: {response.text}")
         return None
 
-# Step 1: Get id of the root organization (Synqly Backoffice)
-def get_root_organization():
-    url = f"{BASE_URL}/v1/private/synqly-backoffice"
-    print(f"\nRequesting root organization from: {url}")
-
-    response = requests.get(url, headers=headers)
-    json_response = print_response(response, "Root Organization Response")
-
-    if json_response and 'id' in json_response['result']:
-        return json_response['result']['id']
-    else:
-        raise Exception("Failed to get root organization ID")
-
-# Step 2: Get organization
-def get_organization(organization_name):
-    url = f"{BASE_URL}/v1/organizations/{organization_name}"
-    print(f"\nRequesting organization details from: {url}")
-
-    response = requests.get(url, headers=headers)
-    json_response = print_response(response, "Organization Response")
-
-    if json_response and 'id' in json_response['result']:
-        return json_response['result']['id'], json_response['result'].get('refresh_token_id')
-    else:
-        raise Exception("Failed to get organization ID or refresh token ID")
-
-# Step 3: Login to get token for admin user
-def login(root_organization_id, organization_id):
-    url = f"{BASE_URL}/v1/auth/private/{root_organization_id}/{organization_id}"
+# Step 1: Login to get token for admin user
+def login():
+    url = f"{BASE_URL}/v1/auth/logon/{organization_name}"
     print(f"\nLogging in: {url}")
 
     payload = {
@@ -73,7 +45,16 @@ def login(root_organization_id, organization_id):
     except Exception as e:
         raise Exception(f"Failed to get token for admin user: {e}")
 
-# Step 4: Reset organization token
+# Step 2: Get organization details
+def get_organization_details(bearer_token):
+    url = f"{BASE_URL}/v1/organization"
+    print(f"\nGetting organization details: {url}")
+    headers["Authorization"] = f"Bearer {bearer_token}"
+    response = requests.get(url, headers=headers)
+    json_response = print_response(response, "Organization Details Response")
+    return json_response['result']
+
+# Step 3: Reset organization token
 def reset_organization_token(organization_id, refresh_token_id, bearer_token):
     url = f"{BASE_URL}/v1/tokens/{organization_id}/{refresh_token_id}/reset"
     print(f"\nResetting organization token: {url}")
@@ -94,18 +75,14 @@ def reset_organization_token(organization_id, refresh_token_id, bearer_token):
 
 def main():
     try:
-        # Get root organization ID
-        root_organization_id = get_root_organization()
-        print(f"Root Organization ID: {root_organization_id}")
+        # Login to get bearer token
+        admin_token = login()
 
         # Get organization details
-        organization_id, refresh_token_id = get_organization(organization_name)
-        print(f"Organization ID: {organization_id}")
-        print(f"Refresh Token ID: {refresh_token_id}")
-
-        # Login to get bearer token
-        admin_token = login(root_organization_id, organization_id)
-        print(f"Admin Access Token: {admin_token}")
+        organization_details = get_organization_details(admin_token)
+        print(f"Organization Details: {organization_details}")
+        organization_id = organization_details['id']
+        refresh_token_id = organization_details['refresh_token_id']
 
         # Reset organization token
         reset_result = reset_organization_token(organization_id, refresh_token_id, admin_token)
