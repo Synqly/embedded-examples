@@ -4,7 +4,7 @@ import os
 import requests
 
 # Base URL for all requests
-BASE_URL = os.getenv("BASE_URL") if os.getenv("BASE_URL") else "http://localhost:9000"
+BASE_URL = os.getenv("BASE_URL") if os.getenv("BASE_URL") else "http://localhost:8000"
 
 admin_email = os.getenv("ADMIN_EMAIL")
 admin_password = os.getenv("ADMIN_PASSWORD")

@@ -17,7 +17,7 @@ The script uses environment variables for configuration. The provided `.env` fil
 
 ## Usage
 
-Make sure your Synqly Embedded service is running and has the API exposed. The default in the docker-compose example is `http://localhost:9000`.
+Make sure your Synqly Embedded service is running and has the API exposed. The default in the docker-compose example is `http://localhost:8000`.
 
 Export the environment variables from the `.env` file:
 
