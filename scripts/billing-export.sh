@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+# ─── Functions ───────────────────────────────────────────
+
 # Display usage information
 show_usage() {
 	cat <<EOF
@@ -59,7 +61,7 @@ EOF
 check_dependencies() {
 	local missing=()
 	for cmd in curl jq tar gzip; do
-		if ! command -v "$cmd" &>/dev/null; then
+		if ! command -v "$cmd" >/dev/null 2>&1; then
 			missing+=("$cmd")
 		fi
 	done
@@ -128,282 +130,53 @@ resolve_password() {
 		return
 	fi
 
-	# 4. Piped stdin (not a TTY)
-	if [[ ! -t 0 ]]; then
-		read -r PASSWORD
-		return
-	fi
-
-	# 5. Interactive prompt (TTY detected)
+	# 4. stdin pipe or interactive prompt
 	if [[ -t 0 ]]; then
 		read -rsp "Password: " PASSWORD
 		echo >&2
-		return
-	fi
-
-	echo "Error: No password provided" >&2
-	exit 1
-}
-
-# Get Synqly version (unauthenticated)
-get_synqly_version() {
-	local response
-	response=$(curl -s $INSECURE "${URL}/v1/version")
-	if [[ $? -ne 0 ]]; then
-		echo "Error: Failed to connect to ${URL}" >&2
-		exit 1
-	fi
-	echo "$response" | jq -r '.version // "unknown"'
-}
-
-# Authenticate and get access token
-authenticate() {
-	local response
-	response=$(curl -s $INSECURE -X POST \
-		-H "Content-Type: application/json" \
-		-H "Authorization: Bearer ${TOKEN}" \
-		-d "{\"name\": \"${USER}\", \"secret\": \"${PASSWORD}\"}" \
-		"${URL}/v1/auth/logon/synqly-backoffice")
-
-	if [[ $? -ne 0 ]]; then
-		echo "Error: Network error during authentication" >&2
-		exit 1
-	fi
-
-	# Check for API-level errors (4xx/5xx responses with .message)
-	local api_error=$(echo "$response" | jq -r '.message // empty')
-	if [[ -n "$api_error" ]]; then
-		echo "Authentication failed: $api_error" >&2
-		exit 1
-	fi
-
-	# Check auth_code for authentication result
-	local auth_code=$(echo "$response" | jq -r '.result.auth_code // empty')
-	if [[ "$auth_code" != "success" ]]; then
-		local auth_msg=$(echo "$response" | jq -r '.result.auth_msg // "authentication failed"')
-		echo "Authentication failed: $auth_msg (code: $auth_code)" >&2
-		exit 1
-	fi
-
-	local token=$(echo "$response" | jq -r '.result.token.access.secret // empty')
-	if [[ -z "$token" ]]; then
-		echo "Authentication failed: no access token returned" >&2
-		exit 1
-	fi
-
-	echo "$token"
-}
-
-# Cleanup function for temp directory
-cleanup() {
-	if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
-		rm -rf "$TEMP_DIR"
+	else
+		read -r PASSWORD
 	fi
 }
 
-# Log message to export.log with timestamp
-log() {
-	local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-	echo "${timestamp} $1" | tee -a "$LOG_FILE" >&2
-}
+# Month utilities
 
-# Defaults
-OUTPUT_DIR="."
-INSECURE=""
-MONTH=""
-FROM_MONTH=""
-TO_MONTH=""
-PASSWORD=""
-PASSWORD_FILE=""
-TOKEN=""
-TOKEN_FILE=""
-URL=""
-USER=""
-TEMP_DIR=""
-MONTHS_EXPORTED=()
-
-# Parse arguments
-while [[ $# -gt 0 ]]; do
-	case $1 in
-	--help | -h)
-		show_usage
-		;;
-	--url)
-		if [[ $# -lt 2 ]]; then
-			echo "Error: --url requires a value" >&2
-			exit 1
-		fi
-		URL="$2"
-		shift 2
-		;;
-	--token)
-		if [[ $# -lt 2 ]]; then
-			echo "Error: --token requires a value" >&2
-			exit 1
-		fi
-		TOKEN="$2"
-		shift 2
-		;;
-	--token-file)
-		if [[ $# -lt 2 ]]; then
-			echo "Error: --token-file requires a value" >&2
-			exit 1
-		fi
-		TOKEN_FILE="$2"
-		shift 2
-		;;
-	--user)
-		if [[ $# -lt 2 ]]; then
-			echo "Error: --user requires a value" >&2
-			exit 1
-		fi
-		USER="$2"
-		shift 2
-		;;
-	--password)
-		if [[ $# -lt 2 ]]; then
-			echo "Error: --password requires a value" >&2
-			exit 1
-		fi
-		PASSWORD="$2"
-		shift 2
-		;;
-	--password-file)
-		if [[ $# -lt 2 ]]; then
-			echo "Error: --password-file requires a value" >&2
-			exit 1
-		fi
-		PASSWORD_FILE="$2"
-		shift 2
-		;;
-	--month)
-		if [[ $# -lt 2 ]]; then
-			echo "Error: --month requires a value" >&2
-			exit 1
-		fi
-		MONTH="$2"
-		shift 2
-		;;
-	--from)
-		if [[ $# -lt 2 ]]; then
-			echo "Error: --from requires a value" >&2
-			exit 1
-		fi
-		FROM_MONTH="$2"
-		shift 2
-		;;
-	--to)
-		if [[ $# -lt 2 ]]; then
-			echo "Error: --to requires a value" >&2
-			exit 1
-		fi
-		TO_MONTH="$2"
-		shift 2
-		;;
-	--output)
-		if [[ $# -lt 2 ]]; then
-			echo "Error: --output requires a value" >&2
-			exit 1
-		fi
-		OUTPUT_DIR="$2"
-		shift 2
-		;;
-	--insecure)
-		INSECURE="-k"
-		shift
-		;;
-	*)
-		echo "Error: Unknown option: $1" >&2
-		echo "Use --help for usage information" >&2
-		exit 1
-		;;
-	esac
-done
-
-# Check dependencies first
-check_dependencies
-
-# Show usage if no arguments
-if [[ -z "$URL" ]] && [[ -z "$USER" ]] && [[ -z "$MONTH" ]] && [[ -z "$FROM_MONTH" ]]; then
-	show_usage
-fi
-
-# Validate required arguments
-if [[ -z "$URL" ]]; then
-	echo "Error: --url is required" >&2
-	exit 1
-fi
-
-if [[ -z "$USER" ]]; then
-	echo "Error: --user is required" >&2
-	exit 1
-fi
-
-# Warn if insecure mode is enabled
-if [[ -n "$INSECURE" ]]; then
-	echo "WARNING: SSL certificate verification is disabled" >&2
-fi
-
-# Resolve token from multiple sources
-resolve_token
-
-# Resolve password from multiple sources
-resolve_password
-
-# Validate time period arguments
-if [[ -n "$MONTH" ]] && [[ -n "$FROM_MONTH" ]]; then
-	echo "Error: Cannot specify both --month and --from/--to" >&2
-	exit 1
-fi
-
-if [[ -n "$MONTH" ]] && [[ -n "$TO_MONTH" ]]; then
-	echo "Error: Cannot specify both --month and --from/--to" >&2
-	exit 1
-fi
-
-# Note: Allowing no month specified - will default to previous month
-
-if [[ -n "$FROM_MONTH" ]] && [[ -z "$TO_MONTH" ]]; then
-	echo "Error: --from requires --to" >&2
-	exit 1
-fi
-
-if [[ -n "$TO_MONTH" ]] && [[ -z "$FROM_MONTH" ]]; then
-	echo "Error: --to requires --from" >&2
-	exit 1
-fi
+MONTH_NAMES=(january february march april may june july august september october november december)
 
 # Convert month name to number (01-12)
 month_to_number() {
 	local month
 	month=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-	case "$month" in
-	january) echo "01" ;;
-	february) echo "02" ;;
-	march) echo "03" ;;
-	april) echo "04" ;;
-	may) echo "05" ;;
-	june) echo "06" ;;
-	july) echo "07" ;;
-	august) echo "08" ;;
-	september) echo "09" ;;
-	october) echo "10" ;;
-	november) echo "11" ;;
-	december) echo "12" ;;
-	*)
-		echo "Error: Invalid month: $month" >&2
+	for i in "${!MONTH_NAMES[@]}"; do
+		if [[ "${MONTH_NAMES[$i]}" == "$month" ]]; then
+			printf "%02d" "$((i + 1))"
+			return
+		fi
+	done
+	echo "Error: Invalid month: $month" >&2
+	exit 1
+}
+
+# Convert month number (1-12) to name
+number_to_month_name() {
+	local month_num="$1"
+	if [[ $month_num -lt 1 || $month_num -gt 12 ]]; then
+		echo "Error: Invalid month number: $month_num" >&2
 		exit 1
-		;;
-	esac
+	fi
+	echo "${MONTH_NAMES[$((month_num - 1))]}"
 }
 
 # Resolve month name to YYYY-MM format
 # If month > current month, assumes previous year
 resolve_month_year() {
 	local month_name="$1"
-	local month_num=$(month_to_number "$month_name")
-	local current_month=$(date +%m)
-	local current_year=$(date +%Y)
+	local month_num
+	month_num=$(month_to_number "$month_name")
+	local current_month
+	current_month=$(date +%m)
+	local current_year
+	current_year=$(date +%Y)
 
 	# If specified month > current month, use previous year
 	if [[ "$month_num" -gt "$current_month" ]]; then
@@ -415,8 +188,10 @@ resolve_month_year() {
 
 # Get previous month in YYYY-MM format
 get_previous_month() {
-	local current_month=$(date +%m)
-	local current_year=$(date +%Y)
+	local current_month
+	current_month=$(date +%m)
+	local current_year
+	current_year=$(date +%Y)
 
 	if [[ "$current_month" == "01" ]]; then
 		echo "$((current_year - 1))-12"
@@ -434,7 +209,6 @@ generate_month_range() {
 	while [[ "$current" < "$to_month" ]] || [[ "$current" == "$to_month" ]]; do
 		echo "$current"
 
-		# Increment month (handle both GNU and BSD date)
 		local year="${current%-*}"
 		local month="${current#*-}"
 
@@ -457,99 +231,14 @@ normalize_month() {
 	# Check if already in YYYY-MM format
 	if [[ "$input" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
 		echo "$input"
-	else
-		# Assume it's a month name
-		resolve_month_year "$input"
+		return
 	fi
+
+	# Assume it's a month name
+	resolve_month_year "$input"
 }
 
-# Normalize month inputs and apply defaults
-if [[ -z "$MONTH" ]] && [[ -z "$FROM_MONTH" ]]; then
-	# No month specified, default to previous month
-	MONTH=$(get_previous_month)
-	echo "No month specified, defaulting to previous month: $MONTH" >&2
-fi
-
-# Normalize month inputs (convert month names to YYYY-MM)
-if [[ -n "$MONTH" ]]; then
-	MONTH=$(normalize_month "$MONTH")
-
-	# Warn if exporting current month
-	current_month=$(date +%Y-%m)
-	if [[ "$MONTH" == "$current_month" ]]; then
-		echo "Warning: Exporting current month ($MONTH) - data may be incomplete" >&2
-	fi
-fi
-
-if [[ -n "$FROM_MONTH" ]]; then
-	FROM_MONTH=$(normalize_month "$FROM_MONTH")
-fi
-
-if [[ -n "$TO_MONTH" ]]; then
-	TO_MONTH=$(normalize_month "$TO_MONTH")
-
-	# Warn if range includes current month
-	current_month=$(date +%Y-%m)
-	if [[ "$TO_MONTH" == "$current_month" ]]; then
-		echo "Warning: Range includes current month ($TO_MONTH) - data may be incomplete" >&2
-	fi
-fi
-
-# Setup temp directory and cleanup trap
-TEMP_DIR=$(mktemp -d)
-trap cleanup EXIT INT TERM
-
-# Create archive directory structure
-ARCHIVE_NAME="synqly-billing-export-$(date +%Y-%m-%d-%H%M%S)"
-ARCHIVE_DIR="${TEMP_DIR}/${ARCHIVE_NAME}"
-mkdir -p "$ARCHIVE_DIR"
-
-# Setup logging
-LOG_FILE="${ARCHIVE_DIR}/export.log"
-
-# Display processing plan
-echo "Billing Export Configuration:" >&2
-echo "  URL: $URL" >&2
-echo "  User: $USER" >&2
-echo "  Output: $OUTPUT_DIR" >&2
-
-if [[ -n "$MONTH" ]]; then
-	echo "  Month: $MONTH" >&2
-else
-	echo "  Month range: $FROM_MONTH to $TO_MONTH" >&2
-fi
-echo >&2
-
-log "Starting billing export"
-log "URL: $URL"
-log "User: $USER"
-log "Output directory: $OUTPUT_DIR"
-
-# Determine list of months to export
-if [[ -n "$MONTH" ]]; then
-	MONTHS=("$MONTH")
-	log "Exporting single month: $MONTH"
-else
-	MONTHS=($(generate_month_range "$FROM_MONTH" "$TO_MONTH"))
-	log "Exporting month range: $FROM_MONTH to $TO_MONTH"
-fi
-
-# Fetch Synqly version
-echo "Fetching Synqly version..." >&2
-log "Fetching Synqly version"
-SYNQLY_VERSION=$(get_synqly_version)
-echo "  Synqly version: $SYNQLY_VERSION" >&2
-log "Synqly version: $SYNQLY_VERSION"
-
-# Authenticate and get access token
-echo "Authenticating as $USER..." >&2
-log "Authenticating as $USER"
-ACCESS_TOKEN=$(authenticate)
-echo "  Authentication successful" >&2
-log "Authentication successful"
-echo >&2
-
-# Format month as filename (YYYY-MM -> january-2026)
+# Format month as filename (YYYY-MM -> 2026-january)
 format_month_name() {
 	local month="$1" # YYYY-MM format
 	local year="${month%-*}"
@@ -558,24 +247,90 @@ format_month_name() {
 	# Strip leading zero
 	month_num=$((10#$month_num))
 
-	# Convert to month name
-	local month_name=""
-	case "$month_num" in
-	1) month_name="january" ;;
-	2) month_name="february" ;;
-	3) month_name="march" ;;
-	4) month_name="april" ;;
-	5) month_name="may" ;;
-	6) month_name="june" ;;
-	7) month_name="july" ;;
-	8) month_name="august" ;;
-	9) month_name="september" ;;
-	10) month_name="october" ;;
-	11) month_name="november" ;;
-	12) month_name="december" ;;
-	esac
+	local month_name
+	month_name=$(number_to_month_name "$month_num")
 
 	echo "${year}-${month_name}"
+}
+
+# Get Synqly version (unauthenticated)
+get_synqly_version() {
+	local response
+	local curl_rc=0
+	response=$(curl "${CURL_OPTS[@]}" "${URL}/v1/version") || curl_rc=$?
+	if [[ $curl_rc -ne 0 ]]; then
+		echo "Error: Failed to connect to ${URL}" >&2
+		exit 1
+	fi
+	echo "$response" | jq -r '.version // "unknown"'
+}
+
+# Authenticate and get access token
+authenticate() {
+	local body
+	body=$(jq -n --arg name "$SYNQLY_USER" --arg secret "$PASSWORD" '{name: $name, secret: $secret}')
+
+	local response
+	local curl_rc=0
+	response=$(curl "${CURL_OPTS[@]}" -X POST \
+		-H "Content-Type: application/json" \
+		-H "Authorization: Bearer ${TOKEN}" \
+		-d "$body" \
+		"${URL}/v1/auth/logon/synqly-backoffice") || curl_rc=$?
+
+	if [[ $curl_rc -ne 0 ]]; then
+		echo "Error: Network error during authentication" >&2
+		exit 1
+	fi
+
+	# Check for API-level errors (4xx/5xx responses with .message)
+	local api_error
+	api_error=$(echo "$response" | jq -r '.message // empty')
+	if [[ -n "$api_error" ]]; then
+		echo "Authentication failed: $api_error" >&2
+		exit 1
+	fi
+
+	# Check auth_code for authentication result
+	local auth_code
+	auth_code=$(echo "$response" | jq -r '.result.auth_code // empty')
+	if [[ "$auth_code" != "success" ]]; then
+		local auth_msg
+		auth_msg=$(echo "$response" | jq -r '.result.auth_msg // "authentication failed"')
+		echo "Authentication failed: $auth_msg (code: $auth_code)" >&2
+		exit 1
+	fi
+
+	local token
+	token=$(echo "$response" | jq -r '.result.token.access.secret // empty')
+	if [[ -z "$token" ]]; then
+		echo "Authentication failed: no access token returned" >&2
+		exit 1
+	fi
+
+	echo "$token"
+}
+
+# Cleanup function for temp directory
+cleanup() {
+	if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
+		rm -rf "$TEMP_DIR"
+	fi
+}
+
+# Log message to export.log with timestamp
+log() {
+	local timestamp
+	timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+	echo "${timestamp} $1" | tee -a "$LOG_FILE" >&2
+}
+
+# Argument validation helper: require_arg <flag_name> <caller_argc>
+require_arg() {
+	if [[ $2 -lt 2 ]]; then
+		echo "Error: $1 requires a value" >&2
+		exit 1
+	fi
 }
 
 # Fetch billing data for a single month with pagination
@@ -585,7 +340,10 @@ fetch_billing_data() {
 	local cursor=""
 
 	# Extract month name from YYYY-MM format for API query
-	local month_name=$(format_month_name "$month" | sed 's/^[0-9]*-//') # Get just the month name
+	local month_num="${month#*-}"
+	month_num=$((10#$month_num))
+	local month_name
+	month_name=$(number_to_month_name "$month_num")
 
 	while true; do
 		# Use correct filter syntax: month[eq]january (URL-encoded as month%5beq%5d)
@@ -597,11 +355,12 @@ fetch_billing_data() {
 		log "Calling billing API: $url"
 
 		local response
-		response=$(curl -s $INSECURE \
+		local curl_rc=0
+		response=$(curl "${CURL_OPTS[@]}" \
 			-H "Authorization: Bearer ${ACCESS_TOKEN}" \
-			"$url")
+			"$url") || curl_rc=$?
 
-		if [[ $? -ne 0 ]]; then
+		if [[ $curl_rc -ne 0 ]]; then
 			echo "Error: Failed to fetch billing data for ${month}" >&2
 			exit 1
 		fi
@@ -614,15 +373,18 @@ fetch_billing_data() {
 			exit 1
 		fi
 
-		local error=$(echo "$response" | jq -r '.error // empty')
+		local error
+		error=$(echo "$response" | jq -r '.error // empty')
 		if [[ -n "$error" ]]; then
 			echo "Error fetching billing data: $error" >&2
 			exit 1
 		fi
 
 		# Extract data array
-		local data=$(echo "$response" | jq '.result // []')
-		local count=$(echo "$data" | jq 'length')
+		local data
+		data=$(echo "$response" | jq '.result // []')
+		local count
+		count=$(echo "$data" | jq 'length')
 
 		# Merge with existing data
 		all_data=$(echo "$all_data" "$data" | jq -s 'add')
@@ -638,9 +400,20 @@ fetch_billing_data() {
 }
 
 # Generate CSV file from billing data JSON
+#
+# Expected csv_data format per record:
+#   - Header row (column names)
+#   - Detail rows (one per line item)
+#   - "DELETED" sentinel (marks subsequent rows as deleted orgs)
+#   - "TOTAL" sentinel (followed by a summary row; both are skipped)
 generate_csv() {
 	local json_file="$1"
 	local csv_file="$2"
+
+	if ! jq empty "$json_file" 2>/dev/null; then
+		echo "Error: Invalid JSON in $json_file" >&2
+		exit 1
+	fi
 
 	# Extract header from first record and append Deleted column
 	local header
@@ -649,7 +422,8 @@ generate_csv() {
 
 	# Process each organization's csv_data
 	jq -c '.[]' "$json_file" | while IFS= read -r record; do
-		local csv_data=$(echo "$record" | jq -r '.csv_data // ""')
+		local csv_data
+		csv_data=$(echo "$record" | jq -r '.csv_data // ""')
 		local deleted="false"
 		local first_line=true
 
@@ -715,15 +489,16 @@ create_archive() {
 	# Create archive
 	local archive_name="${ARCHIVE_NAME}.tar.gz"
 	local output_file="${OUTPUT_DIR}/${archive_name}"
-	tar -czf "$output_file" -C "$TEMP_DIR" "$ARCHIVE_NAME"
+	local tar_rc=0
+	tar -czf "$output_file" -C "$TEMP_DIR" "$ARCHIVE_NAME" || tar_rc=$?
 
-	if [[ $? -eq 0 ]]; then
-		log "Export complete: ${output_file}"
-		echo "$output_file"
-	else
+	if [[ $tar_rc -ne 0 ]]; then
 		log "ERROR: Failed to create archive"
 		exit 1
 	fi
+
+	log "Export complete: ${output_file}"
+	echo "$output_file"
 }
 
 # Collect billing data for all requested months
@@ -731,12 +506,14 @@ collect_billing_data() {
 	local months=("$@")
 
 	for month in "${months[@]}"; do
-		local month_name=$(format_month_name "$month")
+		local month_name
+		month_name=$(format_month_name "$month")
 		log "Fetching billing data for ${month_name}..."
 
-		local data=$(fetch_billing_data "$month")
-		echo $data >/tmp/data.json
-		local count=$(echo "$data" | jq 'length')
+		local data
+		data=$(fetch_billing_data "$month")
+		local count
+		count=$(echo "$data" | jq 'length')
 
 		if [[ "$count" == "0" ]]; then
 			log "Warning: No data for ${month_name}, skipping"
@@ -755,7 +532,8 @@ collect_billing_data() {
 		generate_csv "$json_file" "$csv_file"
 
 		# Count CSV rows (excluding empty lines)
-		local row_count=$(grep -c . "$csv_file" || echo "0")
+		local row_count
+		row_count=$(grep -c . "$csv_file" || echo "0")
 		log "${row_count} CSV rows written"
 
 		# Track exported months for metadata
@@ -763,17 +541,248 @@ collect_billing_data() {
 	done
 }
 
+# ─── Main ────────────────────────────────────────────────
+
+# Defaults
+OUTPUT_DIR="."
+CURL_OPTS=(-sS)
+INSECURE=false
+MONTH=""
+FROM_MONTH=""
+TO_MONTH=""
+PASSWORD=""
+PASSWORD_FILE=""
+TOKEN=""
+TOKEN_FILE=""
+URL=""
+SYNQLY_USER=""
+TEMP_DIR=""
+MONTHS_EXPORTED=()
+
+# Show usage if no arguments provided
+if [[ $# -eq 0 ]]; then
+	show_usage
+fi
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+	case $1 in
+	--help | -h)
+		show_usage
+		;;
+	--url)
+		require_arg "$1" $#
+		URL="$2"
+		shift 2
+		;;
+	--token)
+		require_arg "$1" $#
+		TOKEN="$2"
+		shift 2
+		;;
+	--token-file)
+		require_arg "$1" $#
+		TOKEN_FILE="$2"
+		shift 2
+		;;
+	--user)
+		require_arg "$1" $#
+		SYNQLY_USER="$2"
+		shift 2
+		;;
+	--password)
+		require_arg "$1" $#
+		PASSWORD="$2"
+		shift 2
+		;;
+	--password-file)
+		require_arg "$1" $#
+		PASSWORD_FILE="$2"
+		shift 2
+		;;
+	--month)
+		require_arg "$1" $#
+		MONTH="$2"
+		shift 2
+		;;
+	--from)
+		require_arg "$1" $#
+		FROM_MONTH="$2"
+		shift 2
+		;;
+	--to)
+		require_arg "$1" $#
+		TO_MONTH="$2"
+		shift 2
+		;;
+	--output)
+		require_arg "$1" $#
+		OUTPUT_DIR="$2"
+		shift 2
+		;;
+	--insecure)
+		CURL_OPTS+=(-k)
+		INSECURE=true
+		shift
+		;;
+	*)
+		echo "Error: Unknown option: $1" >&2
+		echo "Use --help for usage information" >&2
+		exit 1
+		;;
+	esac
+done
+
+# Check dependencies first
+check_dependencies
+
+# Validate required arguments
+if [[ -z "$URL" ]]; then
+	echo "Error: --url is required" >&2
+	exit 1
+fi
+
+if [[ -z "$SYNQLY_USER" ]]; then
+	echo "Error: --user is required" >&2
+	exit 1
+fi
+
+# Warn if insecure mode is enabled
+if [[ "$INSECURE" == true ]]; then
+	echo "WARNING: SSL certificate verification is disabled" >&2
+fi
+
+# Resolve token from multiple sources
+resolve_token
+
+# Resolve password from multiple sources
+resolve_password
+
+# Validate time period arguments
+if [[ -n "$MONTH" ]] && { [[ -n "$FROM_MONTH" ]] || [[ -n "$TO_MONTH" ]]; }; then
+	echo "Error: Cannot specify both --month and --from/--to" >&2
+	exit 1
+fi
+
+# Note: Allowing no month specified - will default to previous month
+
+if [[ -n "$FROM_MONTH" ]] && [[ -z "$TO_MONTH" ]]; then
+	echo "Error: --from requires --to" >&2
+	exit 1
+fi
+
+if [[ -n "$TO_MONTH" ]] && [[ -z "$FROM_MONTH" ]]; then
+	echo "Error: --to requires --from" >&2
+	exit 1
+fi
+
+# Normalize month inputs and apply defaults
+if [[ -z "$MONTH" ]] && [[ -z "$FROM_MONTH" ]]; then
+	# No month specified, default to previous month
+	MONTH=$(get_previous_month)
+	echo "No month specified, defaulting to previous month: $MONTH" >&2
+fi
+
+# Normalize month inputs (convert month names to YYYY-MM)
+current_month=$(date +%Y-%m)
+
+if [[ -n "$MONTH" ]]; then
+	MONTH=$(normalize_month "$MONTH")
+
+	# Warn if exporting current month
+	if [[ "$MONTH" == "$current_month" ]]; then
+		echo "Warning: Exporting current month ($MONTH) - data may be incomplete" >&2
+	fi
+fi
+
+if [[ -n "$FROM_MONTH" ]]; then
+	FROM_MONTH=$(normalize_month "$FROM_MONTH")
+fi
+
+if [[ -n "$TO_MONTH" ]]; then
+	TO_MONTH=$(normalize_month "$TO_MONTH")
+
+	# Warn if range includes current month
+	if [[ "$TO_MONTH" == "$current_month" ]]; then
+		echo "Warning: Range includes current month ($TO_MONTH) - data may be incomplete" >&2
+	fi
+fi
+
+# Validate from/to ordering (after normalization to YYYY-MM)
+if [[ -n "$FROM_MONTH" ]] && [[ -n "$TO_MONTH" ]] && [[ "$FROM_MONTH" > "$TO_MONTH" ]]; then
+	echo "Error: --from ($FROM_MONTH) must not be after --to ($TO_MONTH)" >&2
+	exit 1
+fi
+
+# Validate output directory exists
+if [[ ! -d "$OUTPUT_DIR" ]]; then
+	echo "Error: Output directory does not exist: $OUTPUT_DIR" >&2
+	exit 1
+fi
+
+# Setup temp directory and cleanup trap
+TEMP_DIR=$(mktemp -d)
+trap cleanup EXIT INT TERM
+
+# Create archive directory structure
+ARCHIVE_NAME="synqly-billing-export-$(date +%Y-%m-%d-%H%M%S)"
+ARCHIVE_DIR="${TEMP_DIR}/${ARCHIVE_NAME}"
+mkdir -p "$ARCHIVE_DIR"
+
+# Setup logging
+LOG_FILE="${ARCHIVE_DIR}/export.log"
+
+# Display processing plan
+log "Starting billing export"
+log "URL: $URL"
+log "User: $SYNQLY_USER"
+log "Output directory: $OUTPUT_DIR"
+
+if [[ -n "$MONTH" ]]; then
+	log "Month: $MONTH"
+else
+	log "Month range: $FROM_MONTH to $TO_MONTH"
+fi
+
+# Determine list of months to export
+if [[ -n "$MONTH" ]]; then
+	MONTHS=("$MONTH")
+	log "Exporting single month: $MONTH"
+else
+	MONTHS=()
+	while IFS= read -r line; do
+		MONTHS+=("$line")
+	done < <(generate_month_range "$FROM_MONTH" "$TO_MONTH")
+	log "Exporting month range: $FROM_MONTH to $TO_MONTH"
+fi
+
+# Fetch Synqly version
+log "Fetching Synqly version"
+SYNQLY_VERSION=$(get_synqly_version)
+log "Synqly version: $SYNQLY_VERSION"
+
+# Authenticate and get access token
+log "Authenticating as $SYNQLY_USER"
+ACCESS_TOKEN=$(authenticate)
+log "Authentication successful"
+
 # Collect billing data
 log "Collecting billing data for ${#MONTHS[@]} month(s)"
 collect_billing_data "${MONTHS[@]}"
+
+# Guard against empty export
+if [[ ${#MONTHS_EXPORTED[@]} -eq 0 ]]; then
+	echo "No billing data was exported." >&2
+	exit 0
+fi
 
 # Create archive
 log "Creating archive"
 OUTPUT_FILE=$(create_archive)
 
+# Archive path goes to stdout (for piping); instructions go to stderr
 echo "$OUTPUT_FILE"
 
-# Output sending instructions
 echo >&2
 echo "Send to: monthlyusagereport@synqly.com" >&2
 if [[ ${#MONTHS_EXPORTED[@]} -eq 1 ]]; then
