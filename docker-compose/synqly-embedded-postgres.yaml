@@ -22,7 +22,7 @@ services:
     #  --db-user: DB username
     #  --db-pass: DB Password
     command: >
-      embedded --organization-name=embedded --organization-fullname=Embedded \
+      embedded --organization-name=${SYNQLY_ORG_NAME} --organization-fullname=${SYNQLY_ORG_FULL_NAME} \
         --level=-1 --requests-per-min=10000 --db-host=embedded-database \
         --db-port=5432 --db-user=${DB_USER} --db-pass=${DB_PASS} \
         --port=8000 --token=${SYNQLY_ROOT_TOKEN} --token-signing-key=${SYNQLY_TOKEN_SIGNING_KEY} \
@@ -82,10 +82,7 @@ services:
 
   # (Optional) Runs the Management Console for Embedded. The frontend is
   # parameterized via environment variables rather than CLI arguments, and
-  # the below set is required to wire everything up correctly. If the
-  # `--organization-name` option for the `embedded` container is changed,
-  # then make sure to also update `NEXT_PUBLIC_ALLOWED_ORGS` below
-  # accordingly.
+  # the below set is required to wire everything up correctly.
   management-ui:
     image: quay.io/synqly/management-ui:latest
     environment:
@@ -95,7 +92,7 @@ services:
       - STATUS_URL=http://embedded:8000
       - MANAGEMENT_URL=http://embedded:9000
       - MANAGEMENT_TOKEN=${SYNQLY_ROOT_TOKEN}
-      - NEXT_PUBLIC_ALLOWED_ORGS=embedded
+      - NEXT_PUBLIC_ALLOWED_ORGS=${SYNQLY_ORG_NAME}
     ports:
       - "3000:3000"
     depends_on:
