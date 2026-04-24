@@ -4,25 +4,11 @@
 
 **NOTE:** This assumes that `docker compose` is installed. For more information, see the [installation instructions](https://docs.docker.com/compose/install/).
 
-This compose file also expects a local data directory to persist the database between docker-compose runs.
-This directory can be any directory that's a valid mountable directory for docker.
-If you change the directory path, make sure to update
-`services.embedded-database.volumes[0]` in the docker-compose file you are using.
-
 Synqly Embedded is compatible with any PostgreSQL compatible database, this
-directory contains docker-compose examples for both CockroachDB and Postgres.
+directory contains a docker-compose example using a local Postgres instance.
 
-Create a local directory by running the following:
-
-```
-mkdir -p ~/demo-apps/embedded-postgres
-```
-
-Update the local DB user and password in `.env` to non default values:
-```txt
-DB_USER=<new-user>
-DB_PASS=<new-password>
-```
+Optionally you can update the configuration variables in `.env`, or just use
+the default values.
 
 ## First Run
 
@@ -35,13 +21,13 @@ docker compose -f synqly-embedded-postgres.yaml up
 This will take a few minutes the first time running things while the images
 download and database initializes.
 
-On the first docker-compose run, Embedded will generate a Synqly Organization and
-print the organization details to the docker compose logs. Copy this information
-somewhere durable.
+On the first docker-compose run, Embedded will generate a Synqly
+Organization and print the organization details to the docker compose logs.
+Copy this information somewhere durable.
 
-The token listed under `organization.token.access.secret` is an
-Organization token. It can be used to start running Management API calls, such
-as to [Create an Account](https://docs.synqly.com/reference/accounts_create).
+The token listed under `organization.token.access.secret` is an Organization
+token. It can be used to start running Management API calls, such as to
+[Create an Account](https://docs.synqly.com/reference/accounts_create).
 
 ```bash
 embedded-1           | {"level":"info","address":"localhost:9000","time":"2024-09-25T15:17:15Z","message":"starting management"}
@@ -62,16 +48,18 @@ embedded-1           |     "organization_type": "standard",
 
 ## Embedded Address
 
-Once all of the containers have booted, Synqly Embedded APIs will be available
-at `http://localhost:8000`.
+Once all of the containers have booted, Synqly Embedded APIs will be
+available at `http://localhost:8000`.
 
-To quickly test whether Embedded is running as expected, run the following command
-to fetch the build version:
+To quickly test whether Embedded is running as expected, run the following
+command to fetch the build version:
+
 ```bash
 curl localhost:8000/v1/version
 ```
 
 The response should resemble the following:
+
 ```bash
 {"commit":"e5b1522f","date":"Fri Sep 27 16:30:56 UTC 2024","go_version":"go version go1.22.7 linux/amd64","version":"20240927.1629.01-e5b1522"}%
 ```
@@ -82,14 +70,4 @@ To run a single service only (such as the database):
 
 ```shell
 docker compose -f synqly-embedded-compose.yaml up embedded-database
-```
-
-## Wipe Local Data
-
-```bash
-# Wipe local database storage
-rm -rf ~/demo-apps/embedded-postgres
-
-# Re-initialize local storage
-mkdir -p ~/demo-apps/embedded-postgres
 ```

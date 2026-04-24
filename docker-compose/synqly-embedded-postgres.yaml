@@ -1,8 +1,9 @@
 # This docker-compose file is configured to run Synqly Embedded locally for
-# test purposes. Synqly Embedded combines Synqly's Management and Connector APIs
+# test purposes, along with the frontend services Management and Connect.
+# Synqly Embedded combines Synqly's Management and Connector APIs
 # documented here: https://docs.synqly.com/reference/api-overview
 #
-# Synqly APIs will be available at localhost:8000
+# Synqly APIs will be available at localhost:9000
 volumes:
   embedded-database:
   embedded-mail:
@@ -21,13 +22,13 @@ services:
     #  --db-user: DB username
     #  --db-pass: DB Password
     command: >
-      embedded --organization-name=${SYNQLY_ORG_NAME} --organization-fullname=${SYNQLY_ORG_FULL_NAME} \
+      embedded --organization-name=embedded --organization-fullname=Embedded \
         --level=-1 --requests-per-min=10000 --db-host=embedded-database \
-        --db-port=5432 --db-user ${DB_USER} --db-pass ${DB_PASS} \
+        --db-port=5432 --db-user=${DB_USER} --db-pass=${DB_PASS} \
         --port=8000 --token=${SYNQLY_ROOT_TOKEN} --token-signing-key=${SYNQLY_TOKEN_SIGNING_KEY} \
         --smtp-server=embedded-mail:1025 --smtp-user=${SMTP_USER} \
         --smtp-pass=${SMTP_PASS}  --smtp-tls=false --smtp-domain=http://localhost:3000 \
-        --invite-member="test@sample.com" \
+        --invite-member=${ADMIN_EMAIL} \
         --admin=${ADMIN_EMAIL} --admin-password=${ADMIN_PASSWORD}
     ports:
       - "8000:8000"
@@ -45,7 +46,7 @@ services:
     ports:
       - 5432:5432
     volumes:
-      - ~/demo-apps/embedded-postgres:/var/lib/postgresql/data
+      - embedded-database:/var/lib/postgresql/data
     environment:
       - POSTGRES_USER=${DB_USER}
       - POSTGRES_PASSWORD=${DB_PASS}
@@ -78,3 +79,44 @@ services:
       interval: 3s
       timeout: 3s
       retries: 10
+
+  # (Optional) Runs the Management Console for Embedded. The frontend is
+  # parameterized via environment variables rather than CLI arguments, and
+  # the below set is required to wire everything up correctly. If the
+  # `--organization-name` option for the `embedded` container is changed,
+  # then make sure to also update `NEXT_PUBLIC_ALLOWED_ORGS` below
+  # accordingly.
+  management-ui:
+    image: quay.io/synqly/management-ui:latest
+    environment:
+      - APP_ENV=embedded
+      - APP_URL=http://localhost:3000
+      - CONNECT_URL=http://localhost:3001
+      - STATUS_URL=http://embedded:8000
+      - MANAGEMENT_URL=http://embedded:9000
+      - MANAGEMENT_TOKEN=${SYNQLY_ROOT_TOKEN}
+      - NEXT_PUBLIC_ALLOWED_ORGS=embedded
+    ports:
+      - "3000:3000"
+    depends_on:
+      embedded:
+        condition: service_started
+        restart: true
+
+  # (Optional) Runs the Connect frontend for configuring integrations via
+  # the Management Console and other applications. If this component is
+  # disabled it will disable the configuration of integrations via the
+  # Management Console as well.
+  connect-ui:
+    image: quay.io/synqly/connect-ui:latest
+    environment:
+      - PORT=3001
+      - APP_URL=http://localhost:3001
+      - API_BASE=http://embedded:8000
+    ports:
+      - "3001:3001"
+    depends_on:
+      embedded:
+        condition: service_started
+        restart: true
+
