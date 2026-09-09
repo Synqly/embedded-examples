@@ -29,7 +29,7 @@ resolve_month_year() {
     local current_month=$(date +%m)
     local current_year=$(date +%Y)
 
-    if [[ "$month_num" -gt "$current_month" ]]; then
+    if [[ $((10#$month_num)) -gt $((10#$current_month)) ]]; then
         current_year=$((current_year - 1))
     fi
 

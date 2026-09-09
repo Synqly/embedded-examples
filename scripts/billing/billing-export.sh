@@ -14,11 +14,13 @@ Required Arguments:
   --url URL           Synqly instance URL
   --user USER         Admin username
 
-Root Token (one required, precedence order):
+Root Token (optional, precedence order):
   --token TOKEN            Root token (appears in shell history)
   SYNQLY_TOKEN env var     Set token via environment variable
   --token-file FILE        Path to file containing token
-  Interactive prompt       Prompted if TTY detected and no token provided
+
+  Note: The logon endpoint does not require a token. Supply one only if your
+        deployment puts the Synqly API behind a gateway that demands it.
 
 Password (one required, precedence order):
   --password PASS          Password (appears in shell history)
@@ -37,6 +39,10 @@ Time Period (default: previous month):
         Example: In January 2026, '--month march' resolves to March 2025.
 
 Optional Arguments:
+  --org ORG           Organization the user belongs to (default: synqly-backoffice)
+                      Embedded customers pass their global.organizationID from the
+                      helm chart. Billing data is scoped to that organization; run
+                      the script once per organization if you have more than one.
   --output DIR        Output directory (default: current directory)
   --insecure          Skip SSL certificate verification
 
@@ -50,8 +56,11 @@ Examples:
   # Export with password from stdin pipe (e.g., from vault)
   echo "secret" | ./billing-export.sh --url https://synqly.example.com --token-file ~/.synqly-token --user admin --month 2026-01
 
-  # Export with interactive prompts for token and password
+  # Export with an interactive prompt for the password
   ./billing-export.sh --url https://synqly.example.com --user admin --month 2026-01
+
+  # Export from an embedded install, authenticating against your own organization
+  ./billing-export.sh --url https://synqly.example.com --user admin --org acme --month 2026-01
 
 EOF
 	exit 0
@@ -96,15 +105,7 @@ resolve_token() {
 		return
 	fi
 
-	# 4. Interactive prompt (TTY detected)
-	if [[ -t 0 ]]; then
-		read -rsp "Root Token: " TOKEN
-		echo >&2
-		return
-	fi
-
-	echo "Error: No token provided" >&2
-	exit 1
+	# 4. No token. The logon endpoint does not require one.
 }
 
 # Resolve password from multiple sources in precedence order
@@ -178,8 +179,10 @@ resolve_month_year() {
 	local current_year
 	current_year=$(date +%Y)
 
-	# If specified month > current month, use previous year
-	if [[ "$month_num" -gt "$current_month" ]]; then
+	# If specified month > current month, use previous year.
+	# Both values are zero-padded, so force base 10: bash reads 08 and 09 as
+	# invalid octal.
+	if [[ $((10#$month_num)) -gt $((10#$current_month)) ]]; then
 		current_year=$((current_year - 1))
 	fi
 
@@ -270,13 +273,18 @@ authenticate() {
 	local body
 	body=$(jq -n --arg name "$SYNQLY_USER" --arg secret "$PASSWORD" '{name: $name, secret: $secret}')
 
+	# The logon endpoint does not require a token, so only send one if we have it
+	local headers=(-H "Content-Type: application/json")
+	if [[ -n "$TOKEN" ]]; then
+		headers+=(-H "Authorization: Bearer ${TOKEN}")
+	fi
+
 	local response
 	local curl_rc=0
 	response=$(curl "${CURL_OPTS[@]}" -X POST \
-		-H "Content-Type: application/json" \
-		-H "Authorization: Bearer ${TOKEN}" \
+		"${headers[@]}" \
 		-d "$body" \
-		"${URL}/v1/auth/logon/synqly-backoffice") || curl_rc=$?
+		"${URL}/v1/auth/logon/${SYNQLY_ORG}") || curl_rc=$?
 
 	if [[ $curl_rc -ne 0 ]]; then
 		echo "Error: Network error during authentication" >&2
@@ -556,6 +564,7 @@ TOKEN=""
 TOKEN_FILE=""
 URL=""
 SYNQLY_USER=""
+SYNQLY_ORG="synqly-backoffice"
 TEMP_DIR=""
 MONTHS_EXPORTED=()
 
@@ -588,6 +597,11 @@ while [[ $# -gt 0 ]]; do
 	--user)
 		require_arg "$1" $#
 		SYNQLY_USER="$2"
+		shift 2
+		;;
+	--org)
+		require_arg "$1" $#
+		SYNQLY_ORG="$2"
 		shift 2
 		;;
 	--password)
@@ -736,6 +750,7 @@ LOG_FILE="${ARCHIVE_DIR}/export.log"
 log "Starting billing export"
 log "URL: $URL"
 log "User: $SYNQLY_USER"
+log "Organization: $SYNQLY_ORG"
 log "Output directory: $OUTPUT_DIR"
 
 if [[ -n "$MONTH" ]]; then
