@@ -83,10 +83,12 @@ if [[ ! -s "$PORT_FILE" ]]; then
 fi
 PORT=$(cat "$PORT_FILE")
 
-# Run the export; echo the first POST the stub saw as "<path> <auth|noauth>"
+# Run the export; echo the first POST the stub saw as "<path> <auth|noauth>".
+# Unset SYNQLY_TOKEN so an ambient value in the environment can't add an
+# Authorization header to the no-token cases and flip their assertion.
 logon_request() {
     : >"$REQUESTS_FILE"
-    "$EXPORT_SCRIPT" \
+    env -u SYNQLY_TOKEN "$EXPORT_SCRIPT" \
         --url "http://127.0.0.1:${PORT}" \
         --user admin \
         --password stub-password \
