@@ -2,9 +2,12 @@
 # Test billing-export.sh against a stub HTTP server: the organization in the
 # logon URL, the Authorization header, and the month it resolves an input to.
 #
-# The stub records every request and rejects the logon, so the export stops
-# right after authenticate() has built its request. Everything asserted here
-# is read out of the real script, not a copy of its functions.
+# The stub records every request and rejects every logon but two secrets, so
+# most exports stop right after authenticate() has built its request.
+# ACCEPTED_SECRET gets an access token the billing route serves, and
+# REFUSED_BILLING_SECRET one it refuses. The billing route also serves
+# STUB_ORG_TOKEN. Everything asserted here comes from running the real script
+# against the stub.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,35 +35,110 @@ import os
 import socketserver
 
 REQUESTS = os.environ["STUB_REQUESTS"]
+ACCEPTED_SECRET = os.environ["STUB_ACCEPTED_SECRET"]
+REFUSED_BILLING_SECRET = os.environ["STUB_REFUSED_BILLING_SECRET"]
+ORG_TOKEN = os.environ["STUB_ORG_TOKEN"]
+NOT_JSON_TOKEN = os.environ["STUB_NOT_JSON_TOKEN"]
+EMPTY_401_TOKEN = os.environ["STUB_EMPTY_401_TOKEN"]
+FETCH_EMPTY_401_TOKEN = os.environ["STUB_FETCH_EMPTY_401_TOKEN"]
+EMPTY_200_TOKEN = os.environ["STUB_EMPTY_200_TOKEN"]
+BAD_RESULT_TOKEN = os.environ["STUB_BAD_RESULT_TOKEN"]
+NO_CSV_TOKEN = os.environ["STUB_NO_CSV_TOKEN"]
+CURSOR_TOKEN = os.environ["STUB_CURSOR_TOKEN"]
+HOSTILE_SECRET = os.environ["STUB_HOSTILE_SECRET"]
+HOSTILE_OUTPUT = os.environ["STUB_HOSTILE_OUTPUT"]
+BILLING_RECORD = {
+    "name": "stub",
+    "organization_id": "stub-org",
+    "month": "january",
+    "csv_data": "Organization,Requests\nstub,1\nTOTAL\nstub,1",
+}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    # Record "<method> <path> <auth|noauth> <bearer|->"
     def _record(self):
-        auth = "auth" if self.headers.get("Authorization") else "noauth"
+        header = self.headers.get("Authorization", "")
+        auth = "auth" if header else "noauth"
+        bearer = header[len("Bearer "):] if header.startswith("Bearer ") else "-"
         with open(REQUESTS, "a") as f:
-            f.write("%s %s %s\n" % (self.command, self.path, auth))
+            f.write("%s %s %s %s\n" % (self.command, self.path, auth, bearer))
 
-    def _send(self, body):
-        raw = json.dumps(body).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+    def _send(self, body, status=200):
+        self._write(json.dumps(body).encode(), "application/json", status)
+
+    def _write(self, raw, content_type, status):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
 
     def do_GET(self):
         self._record()
-        self._send({"version": "stub"})
+        if not self.path.startswith("/v1/billing"):
+            self._send({"version": "stub"})
+            return
+        auth = self.headers.get("Authorization")
+        if auth == "Bearer " + NOT_JSON_TOKEN:
+            self._write(b"<html>stub web page</html>", "text/html", 200)
+            return
+        if auth == "Bearer " + EMPTY_401_TOKEN:
+            self._write(b"", "text/plain", 401)
+            return
+        if auth == "Bearer " + EMPTY_200_TOKEN:
+            self._write(b"", "text/plain", 200)
+            return
+        # Passes the token check, then gets a gateway's empty 401 on the month
+        if auth == "Bearer " + FETCH_EMPTY_401_TOKEN:
+            if "limit=1" in self.path:
+                self._send({"result": [BILLING_RECORD]})
+                return
+            self._write(b"", "text/plain", 401)
+            return
+        # Pass the token check, then answer the month with no billing list
+        if auth in ("Bearer " + BAD_RESULT_TOKEN, "Bearer " + NO_CSV_TOKEN) and "limit=1" in self.path:
+            self._send({"result": [BILLING_RECORD]})
+            return
+        if auth == "Bearer " + BAD_RESULT_TOKEN:
+            self._send({"result": "oops"})
+            return
+        if auth == "Bearer " + NO_CSV_TOKEN:
+            self._send({"result": [{"name": "stub", "month": "january"}]})
+            return
+        # One page carrying a cursor curl would glob into two requests, then an
+        # empty page
+        if auth == "Bearer " + CURSOR_TOKEN:
+            if "start_after=" in self.path:
+                self._send({"result": []})
+                return
+            self._send({"result": [BILLING_RECORD], "cursor": "{a,b}"})
+            return
+        if auth not in ("Bearer " + ORG_TOKEN, "Bearer stub-access-token"):
+            self._send({"status": 401, "message": "stub refuses this token"}, 401)
+            return
+        self._send({"result": [BILLING_RECORD]})
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
-        if length:
-            self.rfile.read(length)
+        body = json.loads(self.rfile.read(length)) if length else {}
         self._record()
-        self._send({"message": "stub rejects all logons"})
+        # HOSTILE_SECRET's token would add an "output" line to curl's config
+        access_tokens = {
+            ACCEPTED_SECRET: "stub-access-token",
+            REFUSED_BILLING_SECRET: "stub-refused-access-token",
+            HOSTILE_SECRET: 'x"\noutput = "' + HOSTILE_OUTPUT,
+        }
+        if body.get("secret") not in access_tokens:
+            self._send({"message": "stub rejects all logons"})
+            return
+        self._send({"result": {
+            "auth_code": "success",
+            "token": {"access": {"secret": access_tokens[body["secret"]]}},
+        }})
 
 
 server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
@@ -69,7 +147,30 @@ with open(os.environ["STUB_PORT"], "w") as f:
 server.serve_forever()
 PY
 
-STUB_PORT="$PORT_FILE" STUB_REQUESTS="$REQUESTS_FILE" python3 "${WORK_DIR}/stub.py" &
+ACCEPTED_SECRET="stub-accepted-secret"
+REFUSED_BILLING_SECRET="stub-refused-billing-secret"
+STUB_ORG_TOKEN="stub-org-token-7f3a9c"
+STUB_NOT_JSON_TOKEN="stub-not-json-token"
+STUB_EMPTY_401_TOKEN="stub-empty-401-token"
+STUB_FETCH_EMPTY_401_TOKEN="stub-fetch-empty-401-token"
+STUB_EMPTY_200_TOKEN="stub-empty-200-token"
+STUB_BAD_RESULT_TOKEN="stub-bad-result-token"
+STUB_NO_CSV_TOKEN="stub-no-csv-token"
+STUB_CURSOR_TOKEN="stub-cursor-token"
+HOSTILE_SECRET="stub-hostile-secret"
+HOSTILE_OUTPUT="${WORK_DIR}/hostile-output"
+
+STUB_PORT="$PORT_FILE" STUB_REQUESTS="$REQUESTS_FILE" \
+    STUB_ACCEPTED_SECRET="$ACCEPTED_SECRET" STUB_ORG_TOKEN="$STUB_ORG_TOKEN" \
+    STUB_REFUSED_BILLING_SECRET="$REFUSED_BILLING_SECRET" \
+    STUB_NOT_JSON_TOKEN="$STUB_NOT_JSON_TOKEN" \
+    STUB_EMPTY_401_TOKEN="$STUB_EMPTY_401_TOKEN" \
+    STUB_FETCH_EMPTY_401_TOKEN="$STUB_FETCH_EMPTY_401_TOKEN" \
+    STUB_EMPTY_200_TOKEN="$STUB_EMPTY_200_TOKEN" \
+    STUB_BAD_RESULT_TOKEN="$STUB_BAD_RESULT_TOKEN" STUB_NO_CSV_TOKEN="$STUB_NO_CSV_TOKEN" \
+    STUB_CURSOR_TOKEN="$STUB_CURSOR_TOKEN" \
+    STUB_HOSTILE_SECRET="$HOSTILE_SECRET" STUB_HOSTILE_OUTPUT="$HOSTILE_OUTPUT" \
+    python3 "${WORK_DIR}/stub.py" &
 STUB_PID=$!
 
 for _ in $(seq 1 50); do
@@ -83,34 +184,85 @@ if [[ ! -s "$PORT_FILE" ]]; then
 fi
 PORT=$(cat "$PORT_FILE")
 
-# Run the export; echo the first POST the stub saw as "<path> <auth|noauth>".
-# Unset SYNQLY_TOKEN so an ambient value in the environment can't add an
-# Authorization header to the no-token cases and flip their assertion.
-logon_request() {
+# A curl that records its arguments, so a test can check that no token reaches
+# the process list
+REAL_CURL=$(command -v curl)
+CURL_ARGS_FILE="${WORK_DIR}/curl-args"
+mkdir "${WORK_DIR}/bin"
+cat >"${WORK_DIR}/bin/curl" <<SH
+#!/bin/bash
+printf '%s\n' "\$*" >>"$CURL_ARGS_FILE"
+exec "$REAL_CURL" "\$@"
+SH
+chmod +x "${WORK_DIR}/bin/curl"
+
+# Months follow UTC, as the script and lepton count them
+CURRENT_MONTH=$(date -u +%Y-%m)
+NOW_YEAR="${CURRENT_MONTH%-*}"
+NOW_MONTH="${CURRENT_MONTH#*-}"
+FLOOR_MONTH="$((NOW_YEAR - 1))-${NOW_MONTH}"
+MONTH_NAMES=(january february march april may june july august september
+    october november december)
+MONTH_NAME_PATTERN=$(IFS='|'; echo "${MONTH_NAMES[*]}")
+
+# Run the export into a fresh case directory, with stdin from the caller.
+# SYNQLY_TOKEN and SYNQLY_ORG_TOKEN are unset so an ambient value in the
+# environment can't flip an assertion; leading NAME=VALUE arguments set
+# variables back, as env takes them. Sets CASE_DIR (out/, stdout, stderr) and
+# RUN_RC.
+run_export() {
+    local env_args=()
+    while [[ $# -gt 0 && "$1" == *=* ]]; do
+        env_args+=("$1")
+        shift
+    done
+
+    CASE_DIR=$(mktemp -d "${WORK_DIR}/case.XXXXXX")
+    mkdir "${CASE_DIR}/out"
     : >"$REQUESTS_FILE"
-    env -u SYNQLY_TOKEN "$EXPORT_SCRIPT" \
+    RUN_RC=0
+    env -u SYNQLY_TOKEN -u SYNQLY_ORG_TOKEN ${env_args[@]+"${env_args[@]}"} \
+        "$EXPORT_SCRIPT" \
         --url "http://127.0.0.1:${PORT}" \
-        --user admin \
-        --password stub-password \
-        --month 2026-01 \
-        --output "$WORK_DIR" \
-        "$@" >/dev/null 2>&1 </dev/null || true
+        --output "${CASE_DIR}/out" \
+        "$@" >"${CASE_DIR}/stdout" 2>"${CASE_DIR}/stderr" || RUN_RC=$?
+}
+
+fail() {
+    echo "  ✗ $1"
+    echo "    stderr:"
+    sed 's/^/      /' "${CASE_DIR}/stderr"
+    exit 1
+}
+
+# Run a password logon; echo the first POST the stub saw as "<path> <auth|noauth>"
+logon_request() {
+    run_export "$@" --user admin --password stub-password </dev/null
     awk '/^POST /{print $2, $3; exit}' "$REQUESTS_FILE"
 }
 
+compare_logon() {
+    local description="$1"
+    local expected="$2"
+    local actual="$3"
+
+    if [[ "$actual" != "$expected" ]]; then
+        echo "  ✗ $description -> Expected '$expected', got '${actual:-<no request>}'"
+        exit 1
+    fi
+    echo "  ✓ $description -> $actual"
+}
+
+# Assert the logon request twice, the second time with SYNQLY_ORG_TOKEN set:
+# the password logons read no org-token source (R6)
 assert_logon() {
     local description="$1"
     local expected="$2"
     shift 2
 
-    local actual
-    actual=$(logon_request "$@")
-    if [[ "$actual" == "$expected" ]]; then
-        echo "  ✓ $description -> $actual"
-    else
-        echo "  ✗ $description -> Expected '$expected', got '${actual:-<no request>}'"
-        exit 1
-    fi
+    compare_logon "$description" "$expected" "$(logon_request "$@")"
+    compare_logon "$description, SYNQLY_ORG_TOKEN set" "$expected" \
+        "$(logon_request "SYNQLY_ORG_TOKEN=$STUB_ORG_TOKEN" "$@")"
 }
 
 # Echo the YYYY-MM the script resolved a --month input to, read from its log
@@ -122,6 +274,63 @@ resolved_month() {
         --output "$WORK_DIR" \
         --month "$1" >/dev/null 2>"${WORK_DIR}/run.log" </dev/null || true
     awk -F 'Z Month: ' '/Z Month: /{print $2; exit}' "${WORK_DIR}/run.log"
+}
+
+# Assert the last run_export exited non-zero, printed <text> to stderr, and
+# wrote no archive
+assert_refused() {
+    local description="$1"
+    local text="$2"
+
+    if [[ $RUN_RC -eq 0 ]]; then
+        fail "$description -> exited 0"
+    fi
+    if ! grep -qF -- "$text" "${CASE_DIR}/stderr"; then
+        fail "$description -> stderr lacks '$text'"
+    fi
+    if compgen -G "${CASE_DIR}/out/*.tar.gz" >/dev/null; then
+        fail "$description -> wrote an archive"
+    fi
+    echo "  ✓ $description -> $text"
+}
+
+# Assert the last run_export wrote an archive, fetched a month, and sent
+# <token> as the bearer on every billing request
+assert_exported() {
+    local description="$1"
+    local token="$2"
+
+    if [[ $RUN_RC -ne 0 ]]; then
+        fail "$description -> exited $RUN_RC"
+    fi
+    if ! compgen -G "${CASE_DIR}/out/*.tar.gz" >/dev/null; then
+        fail "$description -> wrote no archive"
+    fi
+    if ! grep -q '^GET /v1/billing?filter=' "$REQUESTS_FILE"; then
+        fail "$description -> fetched no month"
+    fi
+    if awk -v names="^(${MONTH_NAME_PATTERN})$" '$2 ~ /^\/v1\/billing\?filter=/ {
+        m = $2; sub(/^.*month%5beq%5d/, "", m); sub(/&.*/, "", m)
+        if (m !~ names) bad = 1
+    } END {exit !bad}' "$REQUESTS_FILE"; then
+        fail "$description -> a billing request named no month"
+    fi
+    if awk -v t="$token" '$2 ~ /^\/v1\/billing/ && $4 != t {bad = 1} END {exit !bad}' "$REQUESTS_FILE"; then
+        fail "$description -> a billing request carried another bearer"
+    fi
+}
+
+# Assert the last run_export exported through the org-token logon: no logon
+# request, and <token> as the bearer on every billing request (R1)
+assert_org_token_sent() {
+    local description="$1"
+    local token="$2"
+
+    assert_exported "$description" "$token"
+    if grep -q '^POST ' "$REQUESTS_FILE"; then
+        fail "$description -> sent a logon request"
+    fi
+    echo "  ✓ $description -> org token sent, no logon request"
 }
 
 echo "Testing logon request construction..."
@@ -141,33 +350,274 @@ assert_logon "--token stub-token" "/v1/auth/logon/synqly-backoffice auth" --toke
 assert_logon "no token" "/v1/auth/logon/synqly-backoffice noauth"
 echo
 
-# A month name means the most recent occurrence of that month: at or before the
-# current month, and within the last twelve. Asserting the property rather than
-# a fixed date keeps this honest whatever month the suite runs in, and catches
-# the zero-padded month numbers bash reads as invalid octal.
-echo "Test 4: a month name resolves to its most recent occurrence"
-CURRENT_MONTH=$(date +%Y-%m)
-FLOOR_MONTH="$(($(date +%Y) - 1))-$(date +%m)"
-
-for month_name in january february march april may june july august \
-    september october november december; do
+# A month name means its most recent completed occurrence: before the current
+# month, and no earlier than the same month last year. Asserting the property
+# rather than a fixed date keeps this honest whatever month the suite runs in,
+# and catches the zero-padded month numbers bash reads as invalid octal.
+echo "Test 4: a month name resolves to its most recent completed occurrence"
+for month_name in "${MONTH_NAMES[@]}"; do
     resolved=$(resolved_month "$month_name")
 
     if [[ ! "$resolved" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
         echo "  ✗ $month_name -> '${resolved:-<no month logged>}' is not YYYY-MM"
         exit 1
     fi
-    if [[ "$resolved" > "$CURRENT_MONTH" ]]; then
-        echo "  ✗ $month_name -> $resolved is in the future (current month is $CURRENT_MONTH)"
+    if [[ ! "$resolved" < "$CURRENT_MONTH" ]]; then
+        echo "  ✗ $month_name -> $resolved has not completed (current month is $CURRENT_MONTH)"
         exit 1
     fi
-    if [[ ! "$resolved" > "$FLOOR_MONTH" ]]; then
+    if [[ "$resolved" < "$FLOOR_MONTH" ]]; then
         echo "  ✗ $month_name -> $resolved is over twelve months back (floor is $FLOOR_MONTH)"
         exit 1
     fi
 
     echo "  ✓ $month_name -> $resolved"
 done
+echo
+
+echo "Test 5: a refused billing call fails the run"
+run_export --user admin --password "$REFUSED_BILLING_SECRET" </dev/null
+assert_refused "password logon, billing refused" "Error fetching billing data:"
+run_export --org-token "$STUB_FETCH_EMPTY_401_TOKEN" </dev/null
+assert_refused "billing refused with an empty 401" "Error fetching billing data: HTTP 401"
+echo
+
+echo "Test 6: the org-token logon"
+: >"$CURL_ARGS_FILE"
+run_export "PATH=${WORK_DIR}/bin:$PATH" --org-token "$STUB_ORG_TOKEN" </dev/null
+assert_org_token_sent "--org-token" "$STUB_ORG_TOKEN"
+
+if ! grep -q '/v1/billing?filter=' "$CURL_ARGS_FILE"; then
+    fail "curl wrapper -> recorded no billing request"
+fi
+if grep -qF -- "$STUB_ORG_TOKEN" "$CURL_ARGS_FILE"; then
+    fail "curl arguments -> hold the org token"
+fi
+echo "  ✓ curl arguments -> no org token"
+
+mkdir "${CASE_DIR}/extract"
+tar -xzf "${CASE_DIR}"/out/*.tar.gz -C "${CASE_DIR}/extract"
+if grep -rqF -- "$STUB_ORG_TOKEN" "${CASE_DIR}/stdout" "${CASE_DIR}/stderr" "${CASE_DIR}/extract"; then
+    fail "--org-token -> org token found in stdout, stderr or archive"
+fi
+echo "  ✓ stdout, stderr and archive -> no org token"
+
+if ! grep -q 'Z Logon: org token$' "${CASE_DIR}"/extract/*/export.log ||
+    ! grep -q 'Z Authenticating with org token$' "${CASE_DIR}"/extract/*/export.log ||
+    grep -q 'Z User: ' "${CASE_DIR}"/extract/*/export.log; then
+    fail "export.log -> lacks the org-token logon lines, or holds a User: line"
+fi
+echo "  ✓ export.log -> Logon: org token, Authenticating with org token, no User:"
+echo
+
+ORG_TOKEN_FILE="${WORK_DIR}/org-token"
+printf '%s\n' "$STUB_ORG_TOKEN" >"$ORG_TOKEN_FILE"
+
+echo "Test 7: every org-token source selects the logon"
+run_export "SYNQLY_ORG_TOKEN=$STUB_ORG_TOKEN" </dev/null
+assert_org_token_sent "SYNQLY_ORG_TOKEN" "$STUB_ORG_TOKEN"
+run_export --org-token-file "$ORG_TOKEN_FILE" </dev/null
+assert_org_token_sent "--org-token-file FILE" "$STUB_ORG_TOKEN"
+printf '  %s \t\n' "$STUB_ORG_TOKEN" >"${WORK_DIR}/padded-token"
+run_export --org-token-file "${WORK_DIR}/padded-token" </dev/null
+assert_org_token_sent "--org-token-file FILE (surrounding whitespace)" "$STUB_ORG_TOKEN"
+printf '%s\r\n' "$STUB_ORG_TOKEN" >"${WORK_DIR}/crlf-token"
+run_export --org-token-file "${WORK_DIR}/crlf-token" </dev/null
+assert_org_token_sent "--org-token-file FILE (Windows line ending)" "$STUB_ORG_TOKEN"
+run_export "SYNQLY_ORG_TOKEN=${STUB_ORG_TOKEN}"$'\r' </dev/null
+assert_org_token_sent "SYNQLY_ORG_TOKEN (trailing carriage return)" "$STUB_ORG_TOKEN"
+# A named pipe stands in for <(vault kv get ...): bash closes a process
+# substitution's descriptor before run_export reaches the script
+mkfifo "${WORK_DIR}/token-fifo"
+printf '%s\n' "$STUB_ORG_TOKEN" >"${WORK_DIR}/token-fifo" &
+FIFO_WRITER=$!
+run_export --org-token-file "${WORK_DIR}/token-fifo" </dev/null
+kill "$FIFO_WRITER" 2>/dev/null || true
+assert_org_token_sent "--org-token-file FIFO" "$STUB_ORG_TOKEN"
+run_export --org-token-file - < <(printf '%s\n' "$STUB_ORG_TOKEN")
+assert_org_token_sent "--org-token-file - (a line)" "$STUB_ORG_TOKEN"
+run_export --org-token-file - < <(printf '%s' "$STUB_ORG_TOKEN")
+assert_org_token_sent "--org-token-file - (no trailing newline)" "$STUB_ORG_TOKEN"
+echo
+
+WRONG_TOKEN_FILE="${WORK_DIR}/wrong-token"
+printf '%s\n' "file-token" >"$WRONG_TOKEN_FILE"
+
+echo "Test 8: org-token precedence"
+run_export "SYNQLY_ORG_TOKEN=env-token" --org-token "$STUB_ORG_TOKEN" </dev/null
+assert_org_token_sent "--org-token over SYNQLY_ORG_TOKEN" "$STUB_ORG_TOKEN"
+run_export --org-token "$STUB_ORG_TOKEN" --org-token-file "$WRONG_TOKEN_FILE" </dev/null
+assert_org_token_sent "--org-token over --org-token-file" "$STUB_ORG_TOKEN"
+run_export "SYNQLY_ORG_TOKEN=env-token" --org-token-file "$ORG_TOKEN_FILE" </dev/null
+assert_org_token_sent "--org-token-file over SYNQLY_ORG_TOKEN" "$STUB_ORG_TOKEN"
+run_export "SYNQLY_ORG_TOKEN=env-token" --org-token-file - < <(printf '%s\n' "$STUB_ORG_TOKEN")
+assert_org_token_sent "--org-token-file - over SYNQLY_ORG_TOKEN" "$STUB_ORG_TOKEN"
+echo
+
+echo "Test 9: unreadable org-token sources"
+run_export --org-token-file "${WORK_DIR}/missing" </dev/null
+assert_refused "missing --org-token-file" "Error: Org token file not found:"
+run_export --org-token-file - </dev/null
+assert_refused "--org-token-file - with empty stdin" "Error: no org token on stdin"
+: >"${WORK_DIR}/empty-token"
+run_export --org-token-file "${WORK_DIR}/empty-token" </dev/null
+assert_refused "empty --org-token-file" "Error: Org token file is empty:"
+echo
+
+# Assert the token check refused the org token before any month was fetched
+assert_token_check_refused() {
+    local description="$1"
+    local text="$2"
+
+    if grep -q 'filter=' "$REQUESTS_FILE"; then
+        fail "$description -> fetched a month"
+    fi
+    assert_refused "$description" "$text"
+}
+
+echo "Test 10: a refused org token ends the run before any month is fetched"
+run_export --org-token not-the-token </dev/null
+assert_token_check_refused "refused org token" "Authentication failed: stub refuses this token"
+run_export --org-token "$STUB_EMPTY_401_TOKEN" </dev/null
+assert_token_check_refused "org token refused with an empty 401" "Authentication failed: HTTP 401"
+run_export --org-token "$STUB_NOT_JSON_TOKEN" </dev/null
+assert_token_check_refused "org token answered with a web page" "is not a billing list"
+run_export --org-token "$STUB_EMPTY_200_TOKEN" </dev/null
+assert_token_check_refused "org token answered with an empty 200" "is not a billing list"
+echo
+
+# Assert the args are refused before any request, with "Error: <expected>" on
+# stderr
+assert_refused_early() {
+    local expected="$1"
+    shift
+
+    run_export "$@" </dev/null
+    if [[ -s "$REQUESTS_FILE" ]]; then
+        fail "$* -> sent a request"
+    fi
+    assert_refused "$*" "Error: $expected"
+}
+
+echo "Test 11: flags from two logons are refused together"
+assert_refused_early "--user cannot be used with --org-token" --user admin --org-token "$STUB_ORG_TOKEN"
+assert_refused_early "--user cannot be used with --org-token-file" --user admin --org-token-file "$ORG_TOKEN_FILE"
+for flag in --org --password --password-file --token --token-file; do
+    assert_refused_early "$flag cannot be used with --org-token" --org-token "$STUB_ORG_TOKEN" "$flag" acme
+    assert_refused_early "$flag cannot be used with --org-token-file" --org-token-file "$ORG_TOKEN_FILE" "$flag" acme
+    assert_refused_early "$flag cannot be used with SYNQLY_ORG_TOKEN" SYNQLY_ORG_TOKEN=x "$flag" acme
+done
+echo
+
+echo "Test 12: a password logon exports with the access token it was given"
+: >"$CURL_ARGS_FILE"
+run_export "PATH=${WORK_DIR}/bin:$PATH" --user admin --password "$ACCEPTED_SECRET" </dev/null
+assert_exported "password logon" "stub-access-token"
+if ! grep -q '^POST /v1/auth/logon/synqly-backoffice ' "$REQUESTS_FILE"; then
+    fail "password logon -> sent no logon request"
+fi
+echo "  ✓ password logon -> archive written, access token sent on every billing request"
+if grep -qF -- "stub-access-token" "$CURL_ARGS_FILE"; then
+    fail "curl arguments -> hold the access token"
+fi
+echo "  ✓ curl arguments -> no access token"
+echo
+
+echo "Test 13: months outside the last 12 completed are refused before any request"
+TWO_YEARS_BACK="$((NOW_YEAR - 2))-${NOW_MONTH}"
+assert_refused_early "$CURRENT_MONTH is outside the months Synqly keeps" \
+    --org-token "$STUB_ORG_TOKEN" --month "$CURRENT_MONTH"
+assert_refused_early "$TWO_YEARS_BACK is outside the months Synqly keeps" \
+    --org-token "$STUB_ORG_TOKEN" --month "$TWO_YEARS_BACK"
+assert_refused_early "$TWO_YEARS_BACK is outside the months Synqly keeps" \
+    --org-token "$STUB_ORG_TOKEN" --from "$TWO_YEARS_BACK" --to "$FLOOR_MONTH"
+run_export --org-token "$STUB_ORG_TOKEN" --month "$FLOOR_MONTH" </dev/null
+assert_org_token_sent "--month $FLOOR_MONTH, the oldest month kept" "$STUB_ORG_TOKEN"
+
+# A month number outside 01-12 can sort inside the window
+assert_refused_early "Invalid month: $((NOW_YEAR - 1))-13" \
+    --org-token "$STUB_ORG_TOKEN" --month "$((NOW_YEAR - 1))-13"
+assert_refused_early "Invalid month: ${NOW_YEAR}-00" \
+    --org-token "$STUB_ORG_TOKEN" --month "${NOW_YEAR}-00"
+assert_refused_early "Invalid month: septmber" \
+    --org-token "$STUB_ORG_TOKEN" --month septmber
+
+# Arguments are validated before any credential is read, so a bad month is
+# reported ahead of an unreadable token file (or a prompt for a secret)
+assert_refused_early "$CURRENT_MONTH is outside the months Synqly keeps" \
+    --org-token-file "${WORK_DIR}/missing" --month "$CURRENT_MONTH"
+
+# The previous month's name resolves to last month, and the current month's
+# name to the same month last year, so this range runs backwards
+CURRENT_NAME=${MONTH_NAMES[$((10#$NOW_MONTH - 1))]}
+PREVIOUS_NAME=${MONTH_NAMES[$(((10#$NOW_MONTH + 10) % 12))]}
+LAST_MONTH=$(printf '%d-%02d' "$NOW_YEAR" "$((10#$NOW_MONTH - 1))")
+if [[ "$NOW_MONTH" == "01" ]]; then
+    LAST_MONTH="$((NOW_YEAR - 1))-12"
+fi
+assert_refused_early "--from ($LAST_MONTH) must not be after --to ($FLOOR_MONTH)" \
+    --org-token "$STUB_ORG_TOKEN" --from "$PREVIOUS_NAME" --to "$CURRENT_NAME"
+if ! grep -qF "Note: a month name means its most recent completed month, so $CURRENT_NAME is $FLOOR_MONTH" "${CASE_DIR}/stderr"; then
+    fail "--from $PREVIOUS_NAME --to $CURRENT_NAME -> stderr lacks the month-name note"
+fi
+echo "  ✓ --from $PREVIOUS_NAME --to $CURRENT_NAME -> note: $CURRENT_NAME is $FLOOR_MONTH"
+
+# A backwards range of two YYYY-MM names no month, so it carries no note
+assert_refused_early "--from ($LAST_MONTH) must not be after --to ($FLOOR_MONTH)" \
+    --org-token "$STUB_ORG_TOKEN" --from "$LAST_MONTH" --to "$FLOOR_MONTH"
+if grep -qF "Note: a month name" "${CASE_DIR}/stderr"; then
+    fail "--from $LAST_MONTH --to $FLOOR_MONTH -> printed the month-name note"
+fi
+echo "  ✓ --from $LAST_MONTH --to $FLOOR_MONTH -> no month-name note"
+
+# Months are counted in UTC, as lepton counts them. This date reads the last
+# hours of September in UTC and October already in local time, where 2026-09
+# looks complete but lepton still serves September 2025 under its name.
+mkdir "${WORK_DIR}/utc-date"
+cat >"${WORK_DIR}/utc-date/date" <<'SH'
+#!/bin/bash
+if [[ "$1" == "-u" ]]; then
+    echo "2026-09"
+    exit
+fi
+echo "2026-10"
+SH
+chmod +x "${WORK_DIR}/utc-date/date"
+run_export "PATH=${WORK_DIR}/utc-date:$PATH" --org-token "$STUB_ORG_TOKEN" --month 2026-09 </dev/null
+if [[ -s "$REQUESTS_FILE" ]]; then
+    fail "--month 2026-09, UTC still in September -> sent a request"
+fi
+assert_refused "--month 2026-09, UTC still in September" \
+    "Error: 2026-09 is outside the months Synqly keeps"
+echo
+
+echo "Test 14: a token holding characters outside Synqly's set is refused"
+run_export --user admin --password "$HOSTILE_SECRET" </dev/null
+if [[ -e "$HOSTILE_OUTPUT" ]]; then
+    fail "access token carrying a config line -> curl wrote $HOSTILE_OUTPUT"
+fi
+assert_refused "access token carrying a config line" \
+    "Error: token holds characters a Synqly token never has"
+run_export --org-token 'stub"token' </dev/null
+assert_refused "org token holding a quote" \
+    "Error: token holds characters a Synqly token never has"
+echo
+
+echo "Test 15: a month answered with no billing list fails the run"
+run_export --org-token "$STUB_BAD_RESULT_TOKEN" </dev/null
+assert_refused "month answered with a string .result" "is not a billing list"
+run_export --org-token "$STUB_NO_CSV_TOKEN" </dev/null
+assert_refused "month answered with records lacking csv_data" "is not a billing list"
+echo
+
+echo "Test 16: a cursor from the server is sent once, URL-encoded"
+run_export --org-token "$STUB_CURSOR_TOKEN" </dev/null
+assert_org_token_sent "cursor {a,b}" "$STUB_CURSOR_TOKEN"
+if [[ $(grep -c 'start_after=' "$REQUESTS_FILE") -ne 1 ]] ||
+    ! grep -q 'start_after=%7Ba%2Cb%7D ' "$REQUESTS_FILE"; then
+    fail "cursor {a,b} -> expected one request with start_after=%7Ba%2Cb%7D"
+fi
+echo "  ✓ cursor {a,b} -> one request, start_after=%7Ba%2Cb%7D"
 echo
 
 echo "All tests passed!"
