@@ -10,6 +10,10 @@ Usage: billing-export.sh [OPTIONS]
 
 Export billing data from a Synqly instance for specified time periods.
 
+A Synqly version that serves /v1/billing/export builds the archive itself. On
+an older version, or when that request fails, the script fetches each month
+from the billing API and builds the same archive.
+
 Required Arguments:
   --url URL           Synqly instance URL
   --user USER         Admin username, for the password logons. Omit it to log
@@ -392,10 +396,15 @@ authenticate() {
 # GET a URL with ACCESS_TOKEN as the bearer, setting RESPONSE_BODY and
 # RESPONSE_STATUS. The header reaches curl as a config on stdin (-K -), which
 # keeps the token out of the process list and works on any curl; -H @- needs
-# curl 7.55. A network error prints <network_error> and exits.
+# curl 7.55. A network error prints <network_error> and exits, or with an
+# empty <network_error> sets RESPONSE_STATUS to 000 for the caller. Given
+# <output_file>, the body is written there instead, for a binary body a shell
+# variable cannot hold, and RESPONSE_BODY is left empty.
 api_get() {
 	local url="$1"
 	local network_error="$2"
+	# curl reads -o - as stdout
+	local output_file="${3:--}"
 
 	# The token lands inside a curl config line, where a quote, backslash or
 	# newline would change the config (a hostile server could add "output =
@@ -410,7 +419,13 @@ api_get() {
 	local response
 	local curl_rc=0
 	response=$(printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" |
-		curl "${CURL_OPTS[@]}" -K - -w '\n%{http_code}' "$url") || curl_rc=$?
+		curl "${CURL_OPTS[@]}" -K - -o "$output_file" -w '\n%{http_code}' "$url") || curl_rc=$?
+
+	if [[ $curl_rc -ne 0 && -z "$network_error" ]]; then
+		RESPONSE_STATUS="000"
+		RESPONSE_BODY=""
+		return
+	fi
 
 	if [[ $curl_rc -ne 0 ]]; then
 		echo "$network_error" >&2
@@ -473,6 +488,69 @@ require_arg() {
 		echo "Error: $1 requires a value" >&2
 		exit 1
 	fi
+}
+
+# Fetch every requested month as one archive from the billing export endpoint,
+# setting EXPORT_ARCHIVE, EXPORT_NAME and MONTHS_EXPORTED. When the request
+# fails, EXPORT_ARCHIVE is left empty and the script builds the archive.
+fetch_export() {
+	# The endpoint takes month names. The window check above resolved each name
+	# to its most recent completed occurrence, the year lepton reads it as.
+	local last=$((${#MONTHS[@]} - 1))
+	local from
+	from=$(format_month_name "${MONTHS[0]}") || exit 1
+	local to
+	to=$(format_month_name "${MONTHS[$last]}") || exit 1
+	local url="${URL}/v1/billing/export?from=${from#*-}&to=${to#*-}"
+	local served="${TEMP_DIR}/served.tar.gz"
+
+	log "Calling billing export API: $url"
+	api_get "$url" "" "$served"
+
+	# Any failure falls back to the billing API. A version without the endpoint
+	# answers 404, or 403 when the token lacks billing get permission, since its
+	# billing authz reads /v1/billing/export as a get of one record. A proxy can
+	# time out a large export, which lepton builds before sending a byte, and
+	# the per-month requests are smaller. A refusal they hit too ends the run.
+	if [[ "$RESPONSE_STATUS" == 000 ]]; then
+		log "Billing export API gave no response, fetching each month from the billing API"
+		return
+	fi
+
+	if [[ "$RESPONSE_STATUS" != 2* ]]; then
+		log "Billing export API answered HTTP ${RESPONSE_STATUS}, fetching each month from the billing API"
+		return
+	fi
+
+	# Every entry sits in one directory named as the script names its own
+	# archive. That name becomes the file name, and an entry outside it would
+	# land wherever the recipient unpacks the archive.
+	local entries
+	entries=$(tar -tzf "$served" 2>/dev/null) || true
+	local name="${entries%%/*}"
+	local name_pattern='^synqly-billing-export-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$'
+	if [[ ! "$name" =~ $name_pattern ]] || grep -qv "^${name}/[A-Za-z0-9._-]*$" <<<"$entries"; then
+		echo "Error: response from ${URL}/v1/billing/export is not a billing export archive" >&2
+		exit 1
+	fi
+
+	local metadata
+	metadata=$(tar -xzOf "$served" "${name}/metadata.json" 2>/dev/null) || true
+	if ! echo "$metadata" | jq -e '.months_included | type == "array" and all(.[]; type == "string")' >/dev/null 2>&1; then
+		echo "Error: billing export archive holds no readable metadata.json" >&2
+		exit 1
+	fi
+
+	# The server's export.log records each month it skipped. Its lines share the
+	# script's timestamp format, so a prefix tells them apart.
+	tar -xzOf "$served" "${name}/export.log" 2>/dev/null | sed 's/^/server: /' >&2 || true
+
+	while IFS= read -r month; do
+		MONTHS_EXPORTED+=("$month")
+	done < <(echo "$metadata" | jq -r '.months_included[]')
+
+	EXPORT_ARCHIVE="$served"
+	EXPORT_NAME="$name"
 }
 
 # Fetch billing data for a single month with pagination
@@ -623,6 +701,18 @@ EOF
 
 # Create tar.gz archive
 create_archive() {
+	# The billing export endpoint's archive is complete as served
+	if [[ -n "$EXPORT_ARCHIVE" ]]; then
+		local served_file="${OUTPUT_DIR}/${EXPORT_NAME}.tar.gz"
+		if ! mv "$EXPORT_ARCHIVE" "$served_file"; then
+			log "ERROR: Failed to create archive"
+			exit 1
+		fi
+		log "Export complete: ${served_file}"
+		echo "$served_file"
+		return
+	fi
+
 	# Move CSV files to archive directory
 	for csv_file in "${TEMP_DIR}"/*.csv; do
 		if [[ -f "$csv_file" ]]; then
@@ -712,6 +802,8 @@ SYNQLY_USER=""
 SYNQLY_ORG="synqly-backoffice"
 TEMP_DIR=""
 MONTHS_EXPORTED=()
+EXPORT_ARCHIVE=""
+EXPORT_NAME=""
 # Read the clock once, in UTC as lepton does (billing.PreviousMonth), so every
 # month worked out in one run agrees with the others and with lepton
 NOW=$(date -u +%Y-%m)
@@ -1006,9 +1098,13 @@ org-token)
 esac
 log "Authentication successful"
 
-# Collect billing data
-log "Collecting billing data for ${#MONTHS[@]} month(s)"
-collect_billing_data "${MONTHS[@]}"
+# Collect billing data. A Synqly version with the billing export endpoint
+# builds the archive itself; on an older one the script pages the billing API.
+fetch_export
+if [[ -z "$EXPORT_ARCHIVE" ]]; then
+	log "Collecting billing data for ${#MONTHS[@]} month(s)"
+	collect_billing_data "${MONTHS[@]}"
+fi
 
 # Guard against empty export
 if [[ ${#MONTHS_EXPORTED[@]} -eq 0 ]]; then
