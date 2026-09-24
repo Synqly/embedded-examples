@@ -12,7 +12,8 @@ Export billing data from a Synqly instance for specified time periods.
 
 Required Arguments:
   --url URL           Synqly instance URL
-  --user USER         Admin username
+  --user USER         Admin username, for the password logons. Omit it to log
+                      on with an org token instead (see Org token below).
 
 Root Token (optional, precedence order):
   --token TOKEN            Root token (appears in shell history)
@@ -29,14 +30,29 @@ Password (one required, precedence order):
   stdin pipe               Echo password | script (for vault integration)
   Interactive prompt       Prompted if TTY detected and no password provided
 
+Org token (in place of --user and a password, precedence order):
+  --org-token TOKEN        Org token (appears in shell history)
+  --org-token-file FILE    Path to file containing org token
+  --org-token-file -       Read stdin: prompted if TTY detected, else one line
+                           from a pipe (for vault integration)
+  SYNQLY_ORG_TOKEN env var Set org token via environment variable
+
+  Note: An org token carries its own organization and needs no logon, so it
+        cannot be combined with --user, --org, --password, --password-file,
+        --token or --token-file. It needs billing list permission, which the
+        org token Synqly Embedded prints on first run has.
+
 Time Period (default: previous month):
   --month MONTH       Export single month (YYYY-MM or name like 'january')
   OR
   --from MONTH        Start month for range (YYYY-MM or name)
   --to MONTH          End month for range (YYYY-MM or name)
 
-  Note: Month names are case-insensitive. If month > current month, assumes previous year.
-        Example: In January 2026, '--month march' resolves to March 2025.
+  Note: Month names are case-insensitive. A month name means its most recent
+        completed occurrence: in September 2026, '--month september' resolves
+        to September 2025. Synqly keeps the last 12 completed months, so a
+        YYYY-MM outside that window, including the current month, is refused.
+        Months are counted in UTC, as Synqly counts them.
 
 Optional Arguments:
   --org ORG           Organization the user belongs to (default: synqly-backoffice)
@@ -61,6 +77,9 @@ Examples:
 
   # Export from an embedded install, authenticating against your own organization
   ./billing-export.sh --url https://synqly.example.com --user admin --org acme --month 2026-01
+
+  # Export with an org token from a file, in place of a user and password
+  ./billing-export.sh --url https://synqly.example.com --org-token-file ~/.synqly-org-token --month 2026-01
 
 EOF
 	exit 0
@@ -140,6 +159,56 @@ resolve_password() {
 	fi
 }
 
+# Resolve org token from multiple sources in precedence order. Called only
+# once logon selection has found one of them set.
+resolve_org_token() {
+	# 1. --org-token flag (already in ORG_TOKEN variable)
+	if [[ -n "${ORG_TOKEN:-}" ]]; then
+		return
+	fi
+
+	# 2. --org-token-file -: stdin
+	if [[ "$ORG_TOKEN_FILE" == "-" ]]; then
+		read_org_token_stdin
+		if [[ -z "$ORG_TOKEN" ]]; then
+			echo "Error: no org token on stdin" >&2
+			exit 1
+		fi
+		return
+	fi
+
+	# 3. --org-token-file FILE: the first line, read as stdin is so surrounding
+	#    whitespace is dropped. -r accepts a FIFO such as <(vault kv get ...).
+	if [[ -n "$ORG_TOKEN_FILE" ]]; then
+		if [[ ! -r "$ORG_TOKEN_FILE" ]]; then
+			echo "Error: Org token file not found: $ORG_TOKEN_FILE" >&2
+			exit 1
+		fi
+		read -r ORG_TOKEN <"$ORG_TOKEN_FILE" || true
+		if [[ -z "$ORG_TOKEN" ]]; then
+			echo "Error: Org token file is empty: $ORG_TOKEN_FILE" >&2
+			exit 1
+		fi
+		return
+	fi
+
+	# 4. Environment variable. Flags come first, so a variable left set for
+	#    another instance never replaces a token named on the command line.
+	ORG_TOKEN="$SYNQLY_ORG_TOKEN"
+}
+
+# Read the org token from stdin: an interactive prompt on a TTY, else one line
+# from a pipe. A pipe without a trailing newline (vault kv get -field) fails
+# read at EOF but still fills ORG_TOKEN.
+read_org_token_stdin() {
+	if [[ -t 0 ]]; then
+		read -rsp "Org token: " ORG_TOKEN || true
+		echo >&2
+		return
+	fi
+	read -r ORG_TOKEN || true
+}
+
 # Month utilities
 
 MONTH_NAMES=(january february march april may june july august september october november december)
@@ -168,39 +237,33 @@ number_to_month_name() {
 	echo "${MONTH_NAMES[$((month_num - 1))]}"
 }
 
-# Resolve month name to YYYY-MM format
-# If month > current month, assumes previous year
+# Resolve month name to YYYY-MM format: its most recent completed occurrence
+# If month >= current month, assumes previous year
 resolve_month_year() {
 	local month_name="$1"
 	local month_num
-	month_num=$(month_to_number "$month_name")
-	local current_month
-	current_month=$(date +%m)
-	local current_year
-	current_year=$(date +%Y)
+	# $(...) runs with errexit off, so a failure has to exit explicitly
+	month_num=$(month_to_number "$month_name") || exit 1
+	local year="$NOW_YEAR"
 
-	# If specified month > current month, use previous year.
+	# If specified month >= current month, use previous year: the current
+	# month has not completed, and lepton serves last year's under its name.
 	# Both values are zero-padded, so force base 10: bash reads 08 and 09 as
 	# invalid octal.
-	if [[ $((10#$month_num)) -gt $((10#$current_month)) ]]; then
-		current_year=$((current_year - 1))
+	if [[ $((10#$month_num)) -ge $((10#$NOW_MONTH)) ]]; then
+		year=$((year - 1))
 	fi
 
-	echo "${current_year}-${month_num}"
+	echo "${year}-${month_num}"
 }
 
 # Get previous month in YYYY-MM format
 get_previous_month() {
-	local current_month
-	current_month=$(date +%m)
-	local current_year
-	current_year=$(date +%Y)
-
-	if [[ "$current_month" == "01" ]]; then
-		echo "$((current_year - 1))-12"
-	else
-		printf "%d-%02d" "$current_year" "$((10#$current_month - 1))"
+	if [[ "$NOW_MONTH" == "01" ]]; then
+		echo "$((NOW_YEAR - 1))-12"
+		return
 	fi
+	printf "%d-%02d" "$NOW_YEAR" "$((10#$NOW_MONTH - 1))"
 }
 
 # Generate list of months in range (YYYY-MM format)
@@ -232,9 +295,16 @@ normalize_month() {
 	local input="$1"
 
 	# Check if already in YYYY-MM format
-	if [[ "$input" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
+	if [[ "$input" =~ ^[0-9]{4}-(0[1-9]|1[0-2])$ ]]; then
 		echo "$input"
 		return
+	fi
+
+	# A month number outside 01-12 can sort inside the window and would export
+	# with an empty month filter
+	if [[ "$input" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
+		echo "Error: Invalid month: $input" >&2
+		exit 1
 	fi
 
 	# Assume it's a month name
@@ -251,7 +321,7 @@ format_month_name() {
 	month_num=$((10#$month_num))
 
 	local month_name
-	month_name=$(number_to_month_name "$month_num")
+	month_name=$(number_to_month_name "$month_num") || exit 1
 
 	echo "${year}-${month_name}"
 }
@@ -319,6 +389,70 @@ authenticate() {
 	echo "$token"
 }
 
+# GET a URL with ACCESS_TOKEN as the bearer, setting RESPONSE_BODY and
+# RESPONSE_STATUS. The header reaches curl as a config on stdin (-K -), which
+# keeps the token out of the process list and works on any curl; -H @- needs
+# curl 7.55. A network error prints <network_error> and exits.
+api_get() {
+	local url="$1"
+	local network_error="$2"
+
+	# The token lands inside a curl config line, where a quote, backslash or
+	# newline would change the config (a hostile server could add "output =
+	# ~/.bashrc" through the logon's access token). Synqly tokens use only
+	# these characters, so anything else is refused.
+	local token_pattern='^[A-Za-z0-9._~+/=:-]+$'
+	if [[ ! "$ACCESS_TOKEN" =~ $token_pattern ]]; then
+		echo "Error: token holds characters a Synqly token never has" >&2
+		exit 1
+	fi
+
+	local response
+	local curl_rc=0
+	response=$(printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN" |
+		curl "${CURL_OPTS[@]}" -K - -w '\n%{http_code}' "$url") || curl_rc=$?
+
+	if [[ $curl_rc -ne 0 ]]; then
+		echo "$network_error" >&2
+		exit 1
+	fi
+
+	RESPONSE_STATUS="${response##*$'\n'}"
+	RESPONSE_BODY="${response%$'\n'*}"
+}
+
+# Echo why the last api_get was refused: the API's .message, or the HTTP status
+# when the body carries none (a gateway's empty 401, an HTML error page)
+refusal_reason() {
+	local message
+	message=$(echo "$RESPONSE_BODY" | jq -r '.message // empty' 2>/dev/null) || true
+	echo "${message:-HTTP $RESPONSE_STATUS}"
+}
+
+# A billing list as lepton returns it: .result is an array of records that each
+# carry csv_data. Any other 2xx body comes from the wrong --url or a broken
+# server, and is never an empty month.
+BILLING_LIST_FILTER='.result | type == "array" and all(.[]; type == "object" and has("csv_data"))'
+
+# Check the org token can list billing records, and set it as ACCESS_TOKEN.
+# The org-token logon's counterpart to authenticate().
+check_org_token() {
+	# A token file or variable written on Windows ends its line in \r
+	ACCESS_TOKEN="${ORG_TOKEN%$'\r'}"
+	api_get "${URL}/v1/billing?limit=1" "Error: Network error during authentication"
+
+	if [[ "$RESPONSE_STATUS" != 2* ]]; then
+		echo "Authentication failed: $(refusal_reason)" >&2
+		exit 1
+	fi
+
+	# A web page, an empty body or {} from the wrong --url is no billing list
+	if ! echo "$RESPONSE_BODY" | jq -e "$BILLING_LIST_FILTER" >/dev/null 2>&1; then
+		echo "Authentication failed: response from ${URL}/v1/billing is not a billing list" >&2
+		exit 1
+	fi
+}
+
 # Cleanup function for temp directory
 cleanup() {
 	if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
@@ -351,25 +485,24 @@ fetch_billing_data() {
 	local month_num="${month#*-}"
 	month_num=$((10#$month_num))
 	local month_name
-	month_name=$(number_to_month_name "$month_num")
+	month_name=$(number_to_month_name "$month_num") || exit 1
 
 	while true; do
 		# Use correct filter syntax: month[eq]january (URL-encoded as month%5beq%5d)
 		local url="${URL}/v1/billing?filter=month%5beq%5d${month_name}"
 		if [[ -n "$cursor" ]]; then
-			url="${url}&start_after=${cursor}"
+			url="${url}&start_after=$(jq -rn --arg c "$cursor" '$c | @uri')"
 		fi
 
 		log "Calling billing API: $url"
 
-		local response
-		local curl_rc=0
-		response=$(curl "${CURL_OPTS[@]}" \
-			-H "Authorization: Bearer ${ACCESS_TOKEN}" \
-			"$url") || curl_rc=$?
+		api_get "$url" "Error: Failed to fetch billing data for ${month}"
+		local response="$RESPONSE_BODY"
 
-		if [[ $curl_rc -ne 0 ]]; then
-			echo "Error: Failed to fetch billing data for ${month}" >&2
+		# A refused call ends the run: lepton's 401/403 carries .message, and a
+		# gateway's may carry no body at all
+		if [[ "$RESPONSE_STATUS" != 2* ]]; then
+			echo "Error fetching billing data: $(refusal_reason)" >&2
 			exit 1
 		fi
 
@@ -385,6 +518,14 @@ fetch_billing_data() {
 		error=$(echo "$response" | jq -r '.error // empty')
 		if [[ -n "$error" ]]; then
 			echo "Error fetching billing data: $error" >&2
+			exit 1
+		fi
+
+		# This runs inside $(...), where errexit is off, so a malformed list
+		# would reach the merge below, fail there, and export a header-only CSV
+		if ! echo "$response" | jq -e "$BILLING_LIST_FILTER" >/dev/null 2>&1; then
+			echo "Error: response from billing API is not a billing list" >&2
+			echo "URL called: $url" >&2
 			exit 1
 		fi
 
@@ -553,7 +694,9 @@ collect_billing_data() {
 
 # Defaults
 OUTPUT_DIR="."
-CURL_OPTS=(-sS)
+# -g sends each URL as built, so a { or [ from the server or in --url never
+# expands into extra requests
+CURL_OPTS=(-sS -g)
 INSECURE=false
 MONTH=""
 FROM_MONTH=""
@@ -562,11 +705,20 @@ PASSWORD=""
 PASSWORD_FILE=""
 TOKEN=""
 TOKEN_FILE=""
+ORG_TOKEN=""
+ORG_TOKEN_FILE=""
 URL=""
 SYNQLY_USER=""
 SYNQLY_ORG="synqly-backoffice"
 TEMP_DIR=""
 MONTHS_EXPORTED=()
+# Read the clock once, in UTC as lepton does (billing.PreviousMonth), so every
+# month worked out in one run agrees with the others and with lepton
+NOW=$(date -u +%Y-%m)
+NOW_YEAR="${NOW%-*}"
+NOW_MONTH="${NOW#*-}"
+# Flags that belong to the password logons, in the order given
+PASSWORD_LOGON_FLAGS=()
 
 # Show usage if no arguments provided
 if [[ $# -eq 0 ]]; then
@@ -587,31 +739,47 @@ while [[ $# -gt 0 ]]; do
 	--token)
 		require_arg "$1" $#
 		TOKEN="$2"
+		PASSWORD_LOGON_FLAGS+=("$1")
 		shift 2
 		;;
 	--token-file)
 		require_arg "$1" $#
 		TOKEN_FILE="$2"
+		PASSWORD_LOGON_FLAGS+=("$1")
 		shift 2
 		;;
 	--user)
 		require_arg "$1" $#
 		SYNQLY_USER="$2"
+		PASSWORD_LOGON_FLAGS+=("$1")
 		shift 2
 		;;
 	--org)
 		require_arg "$1" $#
 		SYNQLY_ORG="$2"
+		PASSWORD_LOGON_FLAGS+=("$1")
 		shift 2
 		;;
 	--password)
 		require_arg "$1" $#
 		PASSWORD="$2"
+		PASSWORD_LOGON_FLAGS+=("$1")
 		shift 2
 		;;
 	--password-file)
 		require_arg "$1" $#
 		PASSWORD_FILE="$2"
+		PASSWORD_LOGON_FLAGS+=("$1")
+		shift 2
+		;;
+	--org-token)
+		require_arg "$1" $#
+		ORG_TOKEN="$2"
+		shift 2
+		;;
+	--org-token-file)
+		require_arg "$1" $#
+		ORG_TOKEN_FILE="$2"
 		shift 2
 		;;
 	--month)
@@ -656,21 +824,46 @@ if [[ -z "$URL" ]]; then
 	exit 1
 fi
 
-if [[ -z "$SYNQLY_USER" ]]; then
-	echo "Error: --user is required" >&2
+# Name the org-token source the run was given, by resolve_org_token's
+# precedence: a flag, or SYNQLY_ORG_TOKEN when no flag names one and --user is
+# absent
+ORG_TOKEN_SOURCE=""
+if [[ -z "$SYNQLY_USER" && -n "${SYNQLY_ORG_TOKEN:-}" ]]; then
+	ORG_TOKEN_SOURCE="SYNQLY_ORG_TOKEN"
+fi
+if [[ -n "$ORG_TOKEN_FILE" ]]; then
+	ORG_TOKEN_SOURCE="--org-token-file"
+fi
+if [[ -n "$ORG_TOKEN" ]]; then
+	ORG_TOKEN_SOURCE="--org-token"
+fi
+
+if [[ -z "$SYNQLY_USER" && -z "$ORG_TOKEN_SOURCE" ]]; then
+	echo "Error: --user or --org-token is required" >&2
 	exit 1
+fi
+
+# Refuse flags from two logons given together, before any prompt or request.
+# SYNQLY_ORG_TOKEN counts as a source only when --user is absent, and the
+# password logons' env vars never count, so a variable left set for one logon
+# leaves a --user run as it is.
+if [[ -n "$ORG_TOKEN_SOURCE" && ${#PASSWORD_LOGON_FLAGS[@]} -gt 0 ]]; then
+	echo "Error: ${PASSWORD_LOGON_FLAGS[0]} cannot be used with $ORG_TOKEN_SOURCE" >&2
+	exit 1
+fi
+
+# Select the logon: --user picks a password logon (backoffice, or org user
+# with --org), and without it an org-token source picks the org-token logon.
+# Each logon reads only its own credential sources.
+LOGON="password"
+if [[ -z "$SYNQLY_USER" ]]; then
+	LOGON="org-token"
 fi
 
 # Warn if insecure mode is enabled
 if [[ "$INSECURE" == true ]]; then
 	echo "WARNING: SSL certificate verification is disabled" >&2
 fi
-
-# Resolve token from multiple sources
-resolve_token
-
-# Resolve password from multiple sources
-resolve_password
 
 # Validate time period arguments
 if [[ -n "$MONTH" ]] && { [[ -n "$FROM_MONTH" ]] || [[ -n "$TO_MONTH" ]]; }; then
@@ -698,15 +891,9 @@ if [[ -z "$MONTH" ]] && [[ -z "$FROM_MONTH" ]]; then
 fi
 
 # Normalize month inputs (convert month names to YYYY-MM)
-current_month=$(date +%Y-%m)
-
+TO_MONTH_INPUT="$TO_MONTH"
 if [[ -n "$MONTH" ]]; then
 	MONTH=$(normalize_month "$MONTH")
-
-	# Warn if exporting current month
-	if [[ "$MONTH" == "$current_month" ]]; then
-		echo "Warning: Exporting current month ($MONTH) - data may be incomplete" >&2
-	fi
 fi
 
 if [[ -n "$FROM_MONTH" ]]; then
@@ -715,24 +902,47 @@ fi
 
 if [[ -n "$TO_MONTH" ]]; then
 	TO_MONTH=$(normalize_month "$TO_MONTH")
-
-	# Warn if range includes current month
-	if [[ "$TO_MONTH" == "$current_month" ]]; then
-		echo "Warning: Range includes current month ($TO_MONTH) - data may be incomplete" >&2
-	fi
 fi
 
 # Validate from/to ordering (after normalization to YYYY-MM)
 if [[ -n "$FROM_MONTH" ]] && [[ -n "$TO_MONTH" ]] && [[ "$FROM_MONTH" > "$TO_MONTH" ]]; then
 	echo "Error: --from ($FROM_MONTH) must not be after --to ($TO_MONTH)" >&2
+	if [[ ! "$TO_MONTH_INPUT" =~ ^[0-9]{4}-[0-9]{2}$ ]]; then
+		echo "Note: a month name means its most recent completed month, so" \
+			"$(number_to_month_name "$((10#$NOW_MONTH))") is $((NOW_YEAR - 1))-${NOW_MONTH}" >&2
+	fi
 	exit 1
 fi
+
+# Lepton keeps a rolling window of the last 12 completed months: one row per
+# month name, overwritten each year. A month outside the window would come back
+# as another year's data under this month's label, so refuse it.
+WINDOW_START="$((NOW_YEAR - 1))-${NOW_MONTH}"
+WINDOW_END=$(get_previous_month)
+for requested in "$MONTH" "$FROM_MONTH" "$TO_MONTH"; do
+	if [[ -n "$requested" && ("$requested" < "$WINDOW_START" || "$requested" > "$WINDOW_END") ]]; then
+		echo "Error: $requested is outside the months Synqly keeps, $WINDOW_START to $WINDOW_END" >&2
+		exit 1
+	fi
+done
 
 # Validate output directory exists
 if [[ ! -d "$OUTPUT_DIR" ]]; then
 	echo "Error: Output directory does not exist: $OUTPUT_DIR" >&2
 	exit 1
 fi
+
+# Resolve credentials for the selected logon, once every argument has been
+# validated, so a prompt for a secret never precedes an argument error
+case "$LOGON" in
+password)
+	resolve_token
+	resolve_password
+	;;
+org-token)
+	resolve_org_token
+	;;
+esac
 
 # Setup temp directory and cleanup trap
 TEMP_DIR=$(mktemp -d)
@@ -749,8 +959,15 @@ LOG_FILE="${ARCHIVE_DIR}/export.log"
 # Display processing plan
 log "Starting billing export"
 log "URL: $URL"
-log "User: $SYNQLY_USER"
-log "Organization: $SYNQLY_ORG"
+case "$LOGON" in
+password)
+	log "User: $SYNQLY_USER"
+	log "Organization: $SYNQLY_ORG"
+	;;
+org-token)
+	log "Logon: org token"
+	;;
+esac
 log "Output directory: $OUTPUT_DIR"
 
 if [[ -n "$MONTH" ]]; then
@@ -777,8 +994,16 @@ SYNQLY_VERSION=$(get_synqly_version)
 log "Synqly version: $SYNQLY_VERSION"
 
 # Authenticate and get access token
-log "Authenticating as $SYNQLY_USER"
-ACCESS_TOKEN=$(authenticate)
+case "$LOGON" in
+password)
+	log "Authenticating as $SYNQLY_USER"
+	ACCESS_TOKEN=$(authenticate)
+	;;
+org-token)
+	log "Authenticating with org token"
+	check_org_token
+	;;
+esac
 log "Authentication successful"
 
 # Collect billing data
