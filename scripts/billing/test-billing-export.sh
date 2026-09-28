@@ -6,8 +6,9 @@
 # most exports stop right after authenticate() has built its request.
 # ACCEPTED_SECRET gets an access token the billing route serves, and
 # REFUSED_BILLING_SECRET one it refuses. The billing route also serves
-# STUB_ORG_TOKEN. Everything asserted here comes from running the real script
-# against the stub.
+# STUB_ORG_TOKEN. The export route answers 404, as a Synqly version without it
+# does, to every token but those starting with EXPORT_PREFIX. Everything
+# asserted here comes from running the real script against the stub.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,9 +31,12 @@ REQUESTS_FILE="${WORK_DIR}/requests"
 
 cat >"${WORK_DIR}/stub.py" <<'PY'
 import http.server
+import io
 import json
 import os
 import socketserver
+import tarfile
+import urllib.parse
 
 REQUESTS = os.environ["STUB_REQUESTS"]
 ACCEPTED_SECRET = os.environ["STUB_ACCEPTED_SECRET"]
@@ -47,6 +51,8 @@ NO_CSV_TOKEN = os.environ["STUB_NO_CSV_TOKEN"]
 CURSOR_TOKEN = os.environ["STUB_CURSOR_TOKEN"]
 HOSTILE_SECRET = os.environ["STUB_HOSTILE_SECRET"]
 HOSTILE_OUTPUT = os.environ["STUB_HOSTILE_OUTPUT"]
+EXPORT_PREFIX = os.environ["STUB_EXPORT_PREFIX"]
+EXPORT_NAME = "synqly-billing-export-2026-09-24-120000"
 BILLING_RECORD = {
     "name": "stub",
     "organization_id": "stub-org",
@@ -81,6 +87,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._record()
         if not self.path.startswith("/v1/billing"):
             self._send({"version": "stub"})
+            return
+        if self.path.startswith("/v1/billing/export"):
+            self._export()
             return
         auth = self.headers.get("Authorization")
         if auth == "Bearer " + NOT_JSON_TOKEN:
@@ -117,20 +126,82 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self._send({"result": [BILLING_RECORD], "cursor": "{a,b}"})
             return
-        if auth not in ("Bearer " + ORG_TOKEN, "Bearer stub-access-token"):
+        if auth not in ("Bearer " + ORG_TOKEN, "Bearer stub-access-token") and \
+                not (auth or "").startswith("Bearer " + EXPORT_PREFIX):
             self._send({"status": 401, "message": "stub refuses this token"}, 401)
             return
         self._send({"result": [BILLING_RECORD]})
+
+    # The export route, keyed by the bearer's suffix after EXPORT_PREFIX:
+    # "archive" labels each month it serves "served-<name>"
+    def _export(self):
+        auth = self.headers.get("Authorization") or ""
+        if not auth.startswith("Bearer " + EXPORT_PREFIX):
+            self._write(b"404 page not found", "text/plain", 404)
+            return
+        kind = auth[len("Bearer " + EXPORT_PREFIX):]
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        names = [query["from"][0], query["to"][0]]
+        if names[0] == names[1]:
+            names = names[:1]
+        # An older version whose billing authz reads the path as a get
+        if kind == "old-403":
+            self._send({"status": 403, "message": "stub denies billing get"}, 403)
+            return
+        if kind == "500":
+            self._send({"status": 500, "message": "stub export failed"}, 500)
+            return
+        # A gateway's bare 502, which curl writes no file for
+        if kind == "empty-502":
+            self._write(b"", "text/plain", 502)
+            return
+        # A proxy that drops the connection without answering
+        if kind == "drop":
+            self.close_connection = True
+            return
+        if kind == "page":
+            self._write(b"<html>stub web page</html>", "text/html", 200)
+            return
+        if kind == "escape":
+            self._write(self._archive(names, ["../escape.csv"]), "application/gzip", 200)
+            return
+        if kind == "empty":
+            self._write(self._archive([], []), "application/gzip", 200)
+            return
+        self._write(self._archive(names, []), "application/gzip", 200)
+
+    # A tar.gz laid out as lepton builds one, with <extra> entries added
+    def _archive(self, names, extra):
+        labels = ["served-" + n for n in names]
+        files = {label + ".csv": "Organization,Requests,Deleted\nstub,1,false\n" for label in labels}
+        files["metadata.json"] = json.dumps({"months_included": labels}) + "\n"
+        files["export.log"] = "2026-09-24T12:00:00Z stub export log\n"
+        for name in extra:
+            files[name] = "stub"
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            directory = tarfile.TarInfo(EXPORT_NAME + "/")
+            directory.type = tarfile.DIRTYPE
+            tar.addfile(directory)
+            for name, body in files.items():
+                raw = body.encode()
+                info = tarfile.TarInfo(EXPORT_NAME + "/" + name)
+                info.size = len(raw)
+                tar.addfile(info, io.BytesIO(raw))
+        return buf.getvalue()
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length)) if length else {}
         self._record()
-        # HOSTILE_SECRET's token would add an "output" line to curl's config
+        # HOSTILE_SECRET's token would add an "output" line to curl's config.
+        # EXPORT_PREFIX + "secret" gets a token the export route serves.
         access_tokens = {
             ACCEPTED_SECRET: "stub-access-token",
             REFUSED_BILLING_SECRET: "stub-refused-access-token",
             HOSTILE_SECRET: 'x"\noutput = "' + HOSTILE_OUTPUT,
+            EXPORT_PREFIX + "secret": EXPORT_PREFIX + "archive",
         }
         if body.get("secret") not in access_tokens:
             self._send({"message": "stub rejects all logons"})
@@ -159,6 +230,7 @@ STUB_NO_CSV_TOKEN="stub-no-csv-token"
 STUB_CURSOR_TOKEN="stub-cursor-token"
 HOSTILE_SECRET="stub-hostile-secret"
 HOSTILE_OUTPUT="${WORK_DIR}/hostile-output"
+EXPORT_PREFIX="stub-export-"
 
 STUB_PORT="$PORT_FILE" STUB_REQUESTS="$REQUESTS_FILE" \
     STUB_ACCEPTED_SECRET="$ACCEPTED_SECRET" STUB_ORG_TOKEN="$STUB_ORG_TOKEN" \
@@ -170,6 +242,7 @@ STUB_PORT="$PORT_FILE" STUB_REQUESTS="$REQUESTS_FILE" \
     STUB_BAD_RESULT_TOKEN="$STUB_BAD_RESULT_TOKEN" STUB_NO_CSV_TOKEN="$STUB_NO_CSV_TOKEN" \
     STUB_CURSOR_TOKEN="$STUB_CURSOR_TOKEN" \
     STUB_HOSTILE_SECRET="$HOSTILE_SECRET" STUB_HOSTILE_OUTPUT="$HOSTILE_OUTPUT" \
+    STUB_EXPORT_PREFIX="$EXPORT_PREFIX" \
     python3 "${WORK_DIR}/stub.py" &
 STUB_PID=$!
 
@@ -618,6 +691,100 @@ if [[ $(grep -c 'start_after=' "$REQUESTS_FILE") -ne 1 ]] ||
     fail "cursor {a,b} -> expected one request with start_after=%7Ba%2Cb%7D"
 fi
 echo "  ✓ cursor {a,b} -> one request, start_after=%7Ba%2Cb%7D"
+echo
+
+# Assert the last run_export saved the export route's archive under its own
+# name, after one export request for <from>..<to> and no month paged from the
+# billing API
+assert_served() {
+    local description="$1"
+    local from="$2"
+    local to="$3"
+    local archive="${CASE_DIR}/out/synqly-billing-export-2026-09-24-120000.tar.gz"
+
+    if [[ $RUN_RC -ne 0 ]]; then
+        fail "$description -> exited $RUN_RC"
+    fi
+    if [[ ! -f "$archive" || "$(cat "${CASE_DIR}/stdout")" != "$archive" ]]; then
+        fail "$description -> served archive not saved under its own name"
+    fi
+    if [[ $(grep -c '^GET /v1/billing/export' "$REQUESTS_FILE") -ne 1 ]] ||
+        ! grep -qF "GET /v1/billing/export?from=${from}&to=${to} " "$REQUESTS_FILE"; then
+        fail "$description -> expected one export request for from=${from}&to=${to}"
+    fi
+    if grep -q '^GET /v1/billing?filter=' "$REQUESTS_FILE"; then
+        fail "$description -> paged the billing API"
+    fi
+    echo "  ✓ $description -> served archive saved, from=${from}&to=${to}"
+}
+
+echo "Test 17: a Synqly version with the export route serves the archive"
+run_export --org-token "${EXPORT_PREFIX}archive" --from "$FLOOR_MONTH" --to "$LAST_MONTH" </dev/null
+assert_served "--from $FLOOR_MONTH --to $LAST_MONTH" "$CURRENT_NAME" "$PREVIOUS_NAME"
+if ! grep -qxF "Subject: <Your Company>: served-${CURRENT_NAME} to served-${PREVIOUS_NAME}" "${CASE_DIR}/stderr"; then
+    fail "subject -> does not name the months metadata.json lists"
+fi
+echo "  ✓ subject -> the months metadata.json lists"
+if ! grep -qxF "server: 2026-09-24T12:00:00Z stub export log" "${CASE_DIR}/stderr"; then
+    fail "stderr -> lacks the served export.log, prefixed server:"
+fi
+echo "  ✓ stderr -> the served export.log, prefixed server:"
+run_export --org-token "${EXPORT_PREFIX}archive" --month "$LAST_MONTH" </dev/null
+assert_served "--month $LAST_MONTH" "$PREVIOUS_NAME" "$PREVIOUS_NAME"
+run_export --user admin --password "${EXPORT_PREFIX}secret" --month "$LAST_MONTH" </dev/null
+assert_served "password logon" "$PREVIOUS_NAME" "$PREVIOUS_NAME"
+if ! grep -q '^POST /v1/auth/logon/synqly-backoffice ' "$REQUESTS_FILE" ||
+    ! grep -qF "GET /v1/billing/export?from=${PREVIOUS_NAME}&to=${PREVIOUS_NAME} auth ${EXPORT_PREFIX}archive" "$REQUESTS_FILE"; then
+    fail "password logon -> export not requested with the logon's access token"
+fi
+echo "  ✓ password logon -> export requested with the logon's access token"
+echo
+
+# Assert the last run_export requested the export, logged <text>, then paged
+# the billing API with <token> and wrote the archive itself
+assert_fell_back() {
+    local description="$1"
+    local token="$2"
+    local text="$3"
+
+    assert_org_token_sent "$description" "$token"
+    if ! awk '/^GET \/v1\/billing\/export\?/ && !e {e = NR} /^GET \/v1\/billing\?filter=/ && !f {f = NR}
+        END {exit !(e && e < f)}' "$REQUESTS_FILE"; then
+        fail "$description -> export not requested before the billing API"
+    fi
+    if ! grep -qF -- "$text" "${CASE_DIR}/stderr"; then
+        fail "$description -> stderr lacks '$text'"
+    fi
+    echo "  ✓ $description -> export requested first, then the billing API paged"
+}
+
+echo "Test 18: a failed export request falls back to the billing API"
+run_export --org-token "$STUB_ORG_TOKEN" </dev/null
+assert_fell_back "export route answers 404" "$STUB_ORG_TOKEN" "Billing export API answered HTTP 404"
+run_export --org-token "${EXPORT_PREFIX}old-403" </dev/null
+assert_fell_back "export route answers 403" "${EXPORT_PREFIX}old-403" "Billing export API answered HTTP 403"
+run_export --org-token "${EXPORT_PREFIX}500" </dev/null
+assert_fell_back "export route answers 500" "${EXPORT_PREFIX}500" "Billing export API answered HTTP 500"
+run_export --org-token "${EXPORT_PREFIX}empty-502" </dev/null
+assert_fell_back "export route answers an empty 502" "${EXPORT_PREFIX}empty-502" "Billing export API answered HTTP 502"
+run_export --org-token "${EXPORT_PREFIX}drop" </dev/null
+assert_fell_back "export route drops the connection" "${EXPORT_PREFIX}drop" "Billing export API gave no response"
+echo
+
+echo "Test 19: an export answered with no billing export archive fails the run"
+run_export --org-token "${EXPORT_PREFIX}page" </dev/null
+assert_refused "export route answers with a web page" "is not a billing export archive"
+run_export --org-token "${EXPORT_PREFIX}escape" </dev/null
+assert_refused "archive entry outside its directory" "is not a billing export archive"
+echo
+
+echo "Test 20: an export holding no billed month writes no archive"
+run_export --org-token "${EXPORT_PREFIX}empty" </dev/null
+if [[ $RUN_RC -ne 0 ]] || compgen -G "${CASE_DIR}/out/*.tar.gz" >/dev/null ||
+    ! grep -qF "No billing data was exported." "${CASE_DIR}/stderr"; then
+    fail "empty export -> expected exit 0, no archive, and 'No billing data was exported.'"
+fi
+echo "  ✓ empty export -> exit 0, no archive"
 echo
 
 echo "All tests passed!"
